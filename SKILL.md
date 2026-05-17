@@ -34,6 +34,13 @@ Import-Module <path-to>\OutlookTools.psm1; Connect-Outlook
 | `Send-OutlookReply -EntryID <id> -Body <html> [-ReplyAll] [-Send]` | Reply to an email. Opens draft by default; `-Send` sends immediately. |
 | `Send-OutlookMail -To <addr> -Subject <text> -Body <text> [-CC] [-Attachments] [-HTML] [-Send]` | Compose new email. Opens draft by default; `-Send` sends immediately. |
 
+## Performance
+
+COM objects do NOT persist between PowerShell calls. Each call re-imports the module and reconnects to Outlook. To avoid slowness:
+
+- **Chain everything in a single PowerShell call.** Import once, then run all the commands you need in one shot.
+- **Never make separate calls** for find → read → save when you can combine them.
+
 ## AI Usage Pattern
 
 When Claude (or any AI agent) needs to work with email:
