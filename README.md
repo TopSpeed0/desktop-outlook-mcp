@@ -1,5 +1,15 @@
 # PowerShell-Outlook-tool
 
+[![GitHub license](https://img.shields.io/github/license/TopSpeed0/PowerShell-Outlook-tool)](https://github.com/TopSpeed0/PowerShell-Outlook-tool/blob/main/LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/TopSpeed0/PowerShell-Outlook-tool)](https://github.com/TopSpeed0/PowerShell-Outlook-tool/stargazers)
+[![GitHub issues](https://img.shields.io/github/issues/TopSpeed0/PowerShell-Outlook-tool)](https://github.com/TopSpeed0/PowerShell-Outlook-tool/issues)
+[![GitHub last commit](https://img.shields.io/github/last-commit/TopSpeed0/PowerShell-Outlook-tool)](https://github.com/TopSpeed0/PowerShell-Outlook-tool/commits/main)
+[![GitHub repo size](https://img.shields.io/github/repo-size/TopSpeed0/PowerShell-Outlook-tool)](https://github.com/TopSpeed0/PowerShell-Outlook-tool)
+[![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-blue?logo=powershell&logoColor=white)](https://docs.microsoft.com/powershell/)
+[![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?logo=windows&logoColor=white)](https://github.com/TopSpeed0/PowerShell-Outlook-tool)
+[![Outlook](https://img.shields.io/badge/Outlook-COM%20Automation-0078D4?logo=microsoftoutlook&logoColor=white)](https://github.com/TopSpeed0/PowerShell-Outlook-tool)
+[![AI Ready](https://img.shields.io/badge/AI%20Ready-Claude%20%7C%20Copilot-blueviolet?logo=github&logoColor=white)](https://github.com/TopSpeed0/PowerShell-Outlook-tool/blob/main/SKILL.md)
+
 PowerShell toolkit for Outlook desktop automation via COM. AI-ready module for Claude Code / GitHub Copilot.
 
 ## Quick Start
