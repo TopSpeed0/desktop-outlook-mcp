@@ -30,6 +30,7 @@ Import-Module <path-to>\OutlookTools.psm1; Connect-Outlook
 | `Get-OutlookFolder [-Mailbox] [-FolderPath]` | Browse folders. Shows name, item count, unread count. |
 | `Get-OutlookMail [-Mailbox] [-FolderPath] [-Count] [-UnreadOnly] [-From] [-Subject]` | List emails with filters. Returns Index, EntryID, Subject, From, Date, preview. |
 | `Read-OutlookMail -EntryID <id>` | Full email: body, HTML, attachments, CC, all fields. |
+| `Save-OutlookAttachment -EntryID <id> [-DestinationPath] [-FileNameFilter]` | Save attachments to disk. Default destination: `~/Downloads`. Filter by regex (e.g. `'\.pdf$'`). |
 | `Send-OutlookReply -EntryID <id> -Body <html> [-ReplyAll] [-Send]` | Reply to an email. Opens draft by default; `-Send` sends immediately. |
 | `Send-OutlookMail -To <addr> -Subject <text> -Body <text> [-CC] [-Attachments] [-HTML] [-Send]` | Compose new email. Opens draft by default; `-Send` sends immediately. |
 
@@ -57,6 +58,15 @@ Send-OutlookReply -EntryID $mail.EntryID -Body '<p>Thank you for the update.</p>
 
 # Reply and send immediately
 Send-OutlookReply -EntryID $mail.EntryID -Body '<p>Confirmed, thanks.</p>' -Send
+
+# Download all attachments from an email
+Save-OutlookAttachment -EntryID $mail.EntryID
+
+# Download only PDFs to a specific folder
+Save-OutlookAttachment -EntryID $mail.EntryID -FileNameFilter '\.pdf$' -DestinationPath 'C:\Temp'
+
+# Download only images
+Save-OutlookAttachment -EntryID $mail.EntryID -FileNameFilter '\.(png|jpg|jpeg|gif|bmp)$'
 
 # New email
 Send-OutlookMail -To 'someone@company.com' -Subject 'Report' -Body '<b>Attached.</b>' -HTML -Attachments 'C:\report.pdf' -Send

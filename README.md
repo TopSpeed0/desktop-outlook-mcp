@@ -33,7 +33,7 @@ Copy-Item outlook-config.example.json outlook-config.json
 
 | File | Description |
 |---|---|
-| `OutlookTools.psm1` | PowerShell module — `Connect-Outlook`, `Get-OutlookMail`, `Read-OutlookMail`, `Send-OutlookReply`, `Send-OutlookMail`, and more |
+| `OutlookTools.psm1` | PowerShell module — `Connect-Outlook`, `Get-OutlookMail`, `Read-OutlookMail`, `Save-OutlookAttachment`, `Send-OutlookReply`, `Send-OutlookMail`, and more |
 | `Install-OutlookSkill.ps1` | One-prompt installer — clones, configures, and verifies |
 | `SKILL.md` | AI skill reference (function docs, usage patterns, safety notes) |
 
@@ -54,6 +54,10 @@ Read-OutlookMail -EntryID $mail.EntryID
 
 # Reply (opens draft by default)
 Send-OutlookReply -EntryID $mail.EntryID -Body '<p>Thanks!</p>'
+
+# Download attachments
+Save-OutlookAttachment -EntryID $mail.EntryID
+Save-OutlookAttachment -EntryID $mail.EntryID -FileNameFilter '\.pdf$' -DestinationPath 'C:\Temp'
 
 # Send new email
 Send-OutlookMail -To 'user@company.com' -Subject 'Report' -Body '<b>See attached.</b>' -HTML -Attachments 'C:\report.pdf' -Send

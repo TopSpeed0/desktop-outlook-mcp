@@ -175,6 +175,44 @@ function Read-OutlookMail {
     }
 }
 
+function Save-OutlookAttachment {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$EntryID,
+
+        [string]$DestinationPath = (Join-Path $env:USERPROFILE 'Downloads'),
+
+        [string]$FileNameFilter
+    )
+    if (-not $script:Namespace) { Connect-Outlook | Out-Null }
+    $item = $script:Namespace.GetItemFromID($EntryID)
+    if (-not $item) { throw "Mail item not found." }
+    if ($item.Attachments.Count -eq 0) { Write-Warning "No attachments on this email."; return }
+
+    if (-not (Test-Path $DestinationPath)) {
+        New-Item -Path $DestinationPath -ItemType Directory -Force | Out-Null
+    }
+
+    $saved = @()
+    foreach ($att in $item.Attachments) {
+        if ($FileNameFilter -and $att.FileName -notmatch $FileNameFilter) { continue }
+        $dest = Join-Path $DestinationPath $att.FileName
+        $att.SaveAsFile($dest)
+        $saved += [PSCustomObject]@{
+            FileName = $att.FileName
+            Size     = $att.Size
+            Path     = $dest
+        }
+        Write-Host "Saved: $dest ($([math]::Round($att.Size / 1KB, 1)) KB)" -ForegroundColor Green
+    }
+
+    if ($saved.Count -eq 0) {
+        Write-Warning "No attachments matched filter '$FileNameFilter'. Available: $($item.Attachments | ForEach-Object { $_.FileName } | Join-String -Separator ', ')"
+    }
+    $saved
+}
+
 function Send-OutlookReply {
     [CmdletBinding(SupportsShouldProcess)]
     param(
@@ -257,4 +295,5 @@ function Send-OutlookMail {
 }
 
 Export-ModuleMember -Function Connect-Outlook, Disconnect-Outlook, Get-OutlookProfile,
-    Get-OutlookFolder, Get-OutlookMail, Read-OutlookMail, Send-OutlookReply, Send-OutlookMail
+    Get-OutlookFolder, Get-OutlookMail, Read-OutlookMail, Save-OutlookAttachment,
+    Send-OutlookReply, Send-OutlookMail
