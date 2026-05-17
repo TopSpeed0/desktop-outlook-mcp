@@ -1,0 +1,15 @@
+# Local config (contains mailbox identity)
+outlook-config.json
+
+# Temp/log files
+*.log
+*.bkp
+
+# AutoIt source (exe is committed)
+*.au3
+
+# OS / editor
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
