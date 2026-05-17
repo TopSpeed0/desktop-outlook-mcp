@@ -1,6 +1,6 @@
 # PowerShell-Outlook-tool
 
-PowerShell toolkit for Outlook desktop automation via COM. Includes an AI-ready module for Claude Code / GitHub Copilot and a standalone GUI for bulk `.msg` file restore.
+PowerShell toolkit for Outlook desktop automation via COM. AI-ready module for Claude Code / GitHub Copilot.
 
 ## Quick Start
 
@@ -26,11 +26,6 @@ Copy-Item outlook-config.example.json outlook-config.json
 | `OutlookTools.psm1` | PowerShell module — `Connect-Outlook`, `Get-OutlookMail`, `Read-OutlookMail`, `Send-OutlookReply`, `Send-OutlookMail`, and more |
 | `Install-OutlookSkill.ps1` | One-prompt installer — clones, configures, and verifies |
 | `SKILL.md` | AI skill reference (function docs, usage patterns, safety notes) |
-| `Restore-MSG.ps1` | Standalone GUI tool for bulk `.msg` file restore to Outlook folders |
-| `Restore-MSG.exe` | Compiled standalone (no PowerShell required) |
-| `function Import-Msg.ps1` | Utility function for `.msg` import |
-| `Clean-up.ps1` | Maintenance utility |
-| `click_yes.exe` | AutoIt helper for unattended dialog confirmation |
 
 ## Usage
 

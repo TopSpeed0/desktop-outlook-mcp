@@ -144,7 +144,7 @@ function Get-OutlookMail {
             To           = $item.To
             ReceivedTime = $item.ReceivedTime
             UnRead       = $item.UnRead
-            BodyPreview  = ($item.Body -replace '\r?\n', ' ').Substring(0, [Math]::Min(200, $item.Body.Length))
+            BodyPreview  = if ($item.Body) { ($item.Body -replace '\r?\n', ' ').Substring(0, [Math]::Min(200, ($item.Body -replace '\r?\n', ' ').Length)) } else { '' }
         }
         $collected++
     }
