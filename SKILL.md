@@ -79,16 +79,25 @@ Save-OutlookAttachment -EntryID $mail.EntryID -FileNameFilter '\.(png|jpg|jpeg|g
 Send-OutlookMail -To 'someone@company.com' -Subject 'Report' -Body '<b>Attached.</b>' -HTML -Attachments 'C:\report.pdf' -Send
 ```
 
+**IMPORTANT:** Do NOT call Outlook COM methods directly (e.g. `$item.GetInspector`, `$namespace.GetItemFromID`). Always use the module functions — they handle connection, mailbox resolution, and cleanup.
+
 ## Config
 
-`outlook-config.json` (gitignored):
+`outlook-config.json` is loaded automatically at import time from the module directory via `$PSScriptRoot` (the folder where the `.psm1` lives — not your current working directory).
+
 ```json
 {
   "mailbox": "Your.Name@company.com"
 }
 ```
 
-When `mailbox` is set, all functions use it as default — no need to pass `-Mailbox` every time.
+To create from template:
+```powershell
+Copy-Item outlook-config.example.json outlook-config.json
+# Edit outlook-config.json and set your real mailbox address
+```
+
+When `mailbox` is set, all functions use it as default — no need to pass `-Mailbox` every time. If the config is missing or has the wrong mailbox, you'll get: `No mailbox specified`.
 
 ## Safety
 
