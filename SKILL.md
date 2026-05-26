@@ -99,6 +99,18 @@ Copy-Item outlook-config.example.json outlook-config.json
 
 When `mailbox` is set, all functions use it as default — no need to pass `-Mailbox` every time. If the config is missing or has the wrong mailbox, you'll get: `No mailbox specified`.
 
+## Email Styling — ALWAYS Apply
+
+When composing or replying to emails, always use professional styled HTML:
+- Font: `Calibri, Arial, sans-serif` 11pt, color `#333`
+- **Green success banners** for completed items / good news: `background: #e8f5e9; border-left: 4px solid #43a047; padding: 10px 14px; border-radius: 4px`
+- **Clean table layouts** for structured point-by-point responses: bold label column (width ~140px, color `#555`) + content column, separated by `border-bottom: 1px solid #e0e0e0`
+- Nested mini-tables for data breakdowns (version lists, VM counts, etc.)
+- `<a href="mailto:...">@Name</a>` for @-mentions
+- Inline styles only — Outlook ignores `<style>` blocks
+- No Word/MSO bloat — keep HTML clean and minimal
+- Tone: professional but concise, not overly formal
+
 ## Safety
 
 - `Send-OutlookReply` and `Send-OutlookMail` open a **draft** by default. Add `-Send` to send immediately.
