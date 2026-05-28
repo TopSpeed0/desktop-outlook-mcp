@@ -1,4 +1,4 @@
-# PowerShell-Outlook-tool
+# [PowerShell-Outlook-tool](https://github.com/TopSpeed0/desktop-outlook-mcp)
 
 [![GitHub license](https://img.shields.io/github/license/TopSpeed0/PowerShell-Outlook-tool)](https://github.com/TopSpeed0/PowerShell-Outlook-tool/blob/main/LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/TopSpeed0/PowerShell-Outlook-tool)](https://github.com/TopSpeed0/PowerShell-Outlook-tool/stargazers)
