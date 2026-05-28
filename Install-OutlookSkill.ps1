@@ -1,7 +1,7 @@
 # Install-OutlookSkill.ps1 — One-prompt setup for the Outlook Mail AI Skill.
 #
 # Usage:
-#   irm https://raw.githubusercontent.com/TopSpeed0/PowerShell-Outlook-tool/main/Install-OutlookSkill.ps1 | iex
+#   irm https://raw.githubusercontent.com/TopSpeed0/desktop-outlook-mcp/main/Install-OutlookSkill.ps1 | iex
 #   — or —
 #   .\Install-OutlookSkill.ps1
 #   — or —
@@ -13,7 +13,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$repoUrl = 'https://github.com/TopSpeed0/PowerShell-Outlook-tool.git'
+$repoUrl = 'https://github.com/TopSpeed0/desktop-outlook-mcp.git'
 
 Write-Host '=== Outlook Mail AI Skill Installer ===' -ForegroundColor Cyan
 
