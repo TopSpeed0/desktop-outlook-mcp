@@ -95,7 +95,7 @@ Example `mcpServers` entry:
 
 | File | Description |
 |---|---|
-| `OutlookTools.psm1` | PowerShell module with `Connect-Outlook`, `Get-OutlookMail`, `Read-OutlookMail`, `Save-OutlookAttachment`, `Send-OutlookReply`, `Send-OutlookMail`, and more |
+| `OutlookTools.psm1` | PowerShell module with `Connect-Outlook`, `Get-OutlookMail`, `Read-OutlookMail`, `Save-OutlookAttachment`, `Send-OutlookReply`, `Send-OutlookMail`, `ConvertTo-EmailMarkdown`, `Save-OutlookMail`, and more |
 | `Install-OutlookSkill.ps1` | One-prompt installer that clones, configures, and verifies everything |
 | `SKILL.md` | AI-oriented reference with usage patterns, examples, and safety notes |
 
@@ -114,6 +114,12 @@ Get-OutlookMail -From 'someone@company.com' -Count 10
 $mail = Get-OutlookMail -Count 1
 Read-OutlookMail -EntryID $mail.EntryID
 
+# Read as clean Markdown (best for AI consumption)
+Read-OutlookMail -EntryID $mail.EntryID -AsMarkdown
+
+# Read as Markdown with truncation
+Read-OutlookMail -EntryID $mail.EntryID -AsMarkdown -MaxBodyLength 3000
+
 # Reply (opens draft by default)
 Send-OutlookReply -EntryID $mail.EntryID -Body '<p>Thanks!</p>'
 
@@ -123,6 +129,17 @@ Save-OutlookAttachment -EntryID $mail.EntryID -FileNameFilter '\.pdf$' -Destinat
 
 # Send new email
 Send-OutlookMail -To 'user@company.com' -Subject 'Report' -Body '<b>See attached.</b>' -HTML -Attachments 'C:\report.pdf' -Send
+
+# Convert HTML to Markdown
+Read-OutlookMail -EntryID $mail.EntryID -IncludeHTML | ConvertTo-EmailMarkdown
+ConvertTo-EmailMarkdown -Html $htmlString
+
+# Save email to file
+Save-OutlookMail -EntryID $mail.EntryID -Format MSG                        # lossless .msg
+Save-OutlookMail -EntryID $mail.EntryID -Format HTML                       # raw HTML
+Save-OutlookMail -EntryID $mail.EntryID -Format TXT                        # plain text
+Save-OutlookMail -EntryID $mail.EntryID -Format Markdown                   # clean .md file
+Save-OutlookMail -EntryID $mail.EntryID -Format MSG -DestinationPath C:\Temp
 ```
 
 ## Requirements

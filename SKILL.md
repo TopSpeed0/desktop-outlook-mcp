@@ -29,10 +29,12 @@ Import-Module <path-to>\OutlookTools.psm1; Connect-Outlook
 | `Get-OutlookProfile` | List all mailboxes/profiles configured in Outlook. |
 | `Get-OutlookFolder [-Mailbox] [-FolderPath]` | Browse folders. Shows name, item count, unread count. |
 | `Get-OutlookMail [-Mailbox] [-FolderPath] [-Count] [-UnreadOnly] [-From] [-Subject]` | List emails with filters. Returns Index, EntryID, Subject, From, Date, preview. |
-| `Read-OutlookMail -EntryID <id> [-IncludeHTML] [-MaxBodyLength <int>]` | Full email: body (text), attachments, CC. Use `-IncludeHTML` only when you need HTML (e.g. for reply). Use `-MaxBodyLength 2000` to truncate long bodies. |
+| `Read-OutlookMail -EntryID <id> [-IncludeHTML] [-AsMarkdown] [-MaxBodyLength <int>]` | Full email: body (text), attachments, CC. Use `-AsMarkdown` for clean Markdown output (best for AI). Use `-IncludeHTML` only when you need HTML (e.g. for reply). Use `-MaxBodyLength 2000` to truncate long bodies. |
 | `Save-OutlookAttachment -EntryID <id> [-DestinationPath] [-FileNameFilter]` | Save attachments to disk. Default destination: `~/Downloads`. Filter by regex (e.g. `'\.pdf$'`). |
 | `Send-OutlookReply -EntryID <id> -Body <html> [-ReplyAll] [-Send]` | Reply to an email. Opens draft by default; `-Send` sends immediately. |
 | `Send-OutlookMail -To <addr> -Subject <text> -Body <text> [-CC] [-Attachments] [-HTML] [-Send]` | Compose new email. Opens draft by default; `-Send` sends immediately. |
+| `ConvertTo-EmailMarkdown -Html <string>` | Convert Outlook HTML to clean Markdown. Strips MSO/Word CSS bloat, converts tables/bold/italic/links/lists to Markdown syntax, decodes HTML entities. Pipeline: `Read-OutlookMail -EntryID $id -IncludeHTML \| ConvertTo-EmailMarkdown` |
+| `Save-OutlookMail -EntryID <id> -Format <MSG\|HTML\|TXT\|Markdown> [-DestinationPath]` | Save email to file. MSG = lossless, HTML = raw, TXT = plain text, Markdown = clean .md with metadata header. Default: `~/Downloads`. |
 
 ## Performance
 
@@ -44,8 +46,10 @@ COM objects do NOT persist between PowerShell calls. Each call re-imports the mo
 ### Token Optimization (AI agents)
 
 - `Read-OutlookMail` now returns **text body only** by default (no HTMLBody). Outlook HTML can be 10-100KB of Word/MSO bloat.
+- Use `-AsMarkdown` for the cleanest AI-friendly output — strips all MSO bloat and returns structured Markdown.
 - Use `-MaxBodyLength 2000` to cap long email bodies (shows char count so you know if truncated).
 - Only add `-IncludeHTML` when you actually need the HTML (e.g., before composing a styled reply).
+- Use `Save-OutlookMail -Format Markdown` to save emails as `.md` files with metadata headers.
 - `Get-OutlookMail` already limits preview to 200 chars — use it for scanning, then `Read-OutlookMail` only for emails you need.
 
 ## AI Usage Pattern
@@ -87,6 +91,25 @@ Save-OutlookAttachment -EntryID $mail.EntryID -FileNameFilter '\.pdf$' -Destinat
 
 # Download only images
 Save-OutlookAttachment -EntryID $mail.EntryID -FileNameFilter '\.(png|jpg|jpeg|gif|bmp)$'
+
+# Read as clean Markdown (best for AI consumption)
+Read-OutlookMail -EntryID $mail.EntryID -AsMarkdown
+
+# Read as Markdown with body truncation
+Read-OutlookMail -EntryID $mail.EntryID -AsMarkdown -MaxBodyLength 3000
+
+# Convert HTML to Markdown via pipeline
+Read-OutlookMail -EntryID $mail.EntryID -IncludeHTML | ConvertTo-EmailMarkdown
+
+# Convert raw HTML string to Markdown
+ConvertTo-EmailMarkdown -Html $item.HTMLBody
+
+# Save email to file (various formats)
+Save-OutlookMail -EntryID $mail.EntryID -Format MSG                        # lossless .msg
+Save-OutlookMail -EntryID $mail.EntryID -Format HTML                       # raw HTML
+Save-OutlookMail -EntryID $mail.EntryID -Format TXT                        # plain text
+Save-OutlookMail -EntryID $mail.EntryID -Format Markdown                   # clean .md file
+Save-OutlookMail -EntryID $mail.EntryID -Format Markdown -DestinationPath C:\Temp
 
 # New email
 Send-OutlookMail -To 'someone@company.com' -Subject 'Report' -Body '<b>Attached.</b>' -HTML -Attachments 'C:\report.pdf' -Send
