@@ -29,7 +29,7 @@ Import-Module <path-to>\OutlookTools.psm1; Connect-Outlook
 | `Get-OutlookProfile` | List all mailboxes/profiles configured in Outlook. |
 | `Get-OutlookFolder [-Mailbox] [-FolderPath]` | Browse folders. Shows name, item count, unread count. |
 | `Get-OutlookMail [-Mailbox] [-FolderPath] [-Count] [-UnreadOnly] [-From] [-Subject]` | List emails with filters. Returns Index, EntryID, Subject, From, Date, preview. |
-| `Read-OutlookMail -EntryID <id>` | Full email: body, HTML, attachments, CC, all fields. |
+| `Read-OutlookMail -EntryID <id> [-IncludeHTML] [-MaxBodyLength <int>]` | Full email: body (text), attachments, CC. Use `-IncludeHTML` only when you need HTML (e.g. for reply). Use `-MaxBodyLength 2000` to truncate long bodies. |
 | `Save-OutlookAttachment -EntryID <id> [-DestinationPath] [-FileNameFilter]` | Save attachments to disk. Default destination: `~/Downloads`. Filter by regex (e.g. `'\.pdf$'`). |
 | `Send-OutlookReply -EntryID <id> -Body <html> [-ReplyAll] [-Send]` | Reply to an email. Opens draft by default; `-Send` sends immediately. |
 | `Send-OutlookMail -To <addr> -Subject <text> -Body <text> [-CC] [-Attachments] [-HTML] [-Send]` | Compose new email. Opens draft by default; `-Send` sends immediately. |
@@ -40,6 +40,13 @@ COM objects do NOT persist between PowerShell calls. Each call re-imports the mo
 
 - **Chain everything in a single PowerShell call.** Import once, then run all the commands you need in one shot.
 - **Never make separate calls** for find → read → save when you can combine them.
+
+### Token Optimization (AI agents)
+
+- `Read-OutlookMail` now returns **text body only** by default (no HTMLBody). Outlook HTML can be 10-100KB of Word/MSO bloat.
+- Use `-MaxBodyLength 2000` to cap long email bodies (shows char count so you know if truncated).
+- Only add `-IncludeHTML` when you actually need the HTML (e.g., before composing a styled reply).
+- `Get-OutlookMail` already limits preview to 200 chars — use it for scanning, then `Read-OutlookMail` only for emails you need.
 
 ## AI Usage Pattern
 
@@ -55,6 +62,12 @@ Get-OutlookMail -Count 5
 # Read a specific email
 $mail = Get-OutlookMail -Count 1
 Read-OutlookMail -EntryID $mail.EntryID
+
+# Read with body truncation (saves tokens for long emails)
+Read-OutlookMail -EntryID $mail.EntryID -MaxBodyLength 2000
+
+# Read with HTML (only when needed for reply formatting)
+Read-OutlookMail -EntryID $mail.EntryID -IncludeHTML
 
 # Search by sender or subject
 Get-OutlookMail -From 'support@vendor.com' -Count 10

@@ -154,13 +154,30 @@ function Read-OutlookMail {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
-        [string]$EntryID
+        [string]$EntryID,
+
+        [switch]$IncludeHTML,
+
+        [switch]$AsMarkdown,
+
+        [int]$MaxBodyLength = 0
     )
     if (-not $script:Namespace) { Connect-Outlook | Out-Null }
     $item = $script:Namespace.GetItemFromID($EntryID)
     if (-not $item) { throw "Mail item not found." }
 
-    [PSCustomObject]@{
+    if ($AsMarkdown) {
+        $bodyText = ConvertTo-EmailMarkdown -Html $item.HTMLBody
+    } else {
+        $bodyText = $item.Body
+    }
+
+    $fullLength = $bodyText.Length
+    if ($MaxBodyLength -gt 0 -and $bodyText.Length -gt $MaxBodyLength) {
+        $bodyText = $bodyText.Substring(0, $MaxBodyLength) + "`n`n[...truncated at $MaxBodyLength chars, total $fullLength chars]"
+    }
+
+    $result = [ordered]@{
         EntryID      = $item.EntryID
         Subject      = $item.Subject
         From         = $item.SenderName
@@ -169,10 +186,16 @@ function Read-OutlookMail {
         CC           = $item.CC
         ReceivedTime = $item.ReceivedTime
         UnRead       = $item.UnRead
-        Body         = $item.Body
-        HTMLBody     = $item.HTMLBody
+        Body         = $bodyText
+        BodyLength   = $fullLength
         Attachments  = @($item.Attachments | ForEach-Object { $_.FileName })
     }
+
+    if ($IncludeHTML) {
+        $result['HTMLBody'] = $item.HTMLBody
+    }
+
+    [PSCustomObject]$result
 }
 
 function Save-OutlookAttachment {
@@ -294,6 +317,211 @@ function Send-OutlookMail {
     }
 }
 
+function ConvertTo-EmailMarkdown {
+    <#
+    .SYNOPSIS
+    Converts Outlook HTML email body to clean Markdown for AI consumption.
+    .DESCRIPTION
+    Strips MSO/Word bloat, converts tables/links/formatting to Markdown.
+    Accepts pipeline input from Read-OutlookMail -IncludeHTML.
+    .EXAMPLE
+    Read-OutlookMail -EntryID $id -IncludeHTML | ConvertTo-EmailMarkdown
+    .EXAMPLE
+    ConvertTo-EmailMarkdown -Html $item.HTMLBody
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(ValueFromPipeline, ValueFromPipelineByPropertyName)]
+        [Alias('HTMLBody')]
+        [string]$Html
+    )
+    process {
+        if (-not $Html) { return '' }
+
+        $md = $Html
+
+        # Remove HTML comments (including MSO conditionals)
+        $md = [regex]::Replace($md, '<!--.*?-->', '', [System.Text.RegularExpressions.RegexOptions]::Singleline)
+
+        # Remove <style> blocks entirely (MSO CSS bloat)
+        $md = [regex]::Replace($md, '<style[^>]*>.*?</style>', '', [System.Text.RegularExpressions.RegexOptions]::Singleline -bor [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+
+        # Remove <script> blocks
+        $md = [regex]::Replace($md, '<script[^>]*>.*?</script>', '', [System.Text.RegularExpressions.RegexOptions]::Singleline -bor [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+
+        # Remove <head> block
+        $md = [regex]::Replace($md, '<head[^>]*>.*?</head>', '', [System.Text.RegularExpressions.RegexOptions]::Singleline -bor [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+
+        # Convert <br> and <br/> to newlines
+        $md = [regex]::Replace($md, '<br\s*/?>', "`n", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+
+        # Convert <hr> to markdown
+        $md = [regex]::Replace($md, '<hr\s*/?>', "`n---`n", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+
+        # Convert headers h1-h6
+        for ($i = 6; $i -ge 1; $i--) {
+            $prefix = '#' * $i
+            $md = [regex]::Replace($md, "<h$i[^>]*>(.*?)</h$i>", "`n$prefix `$1`n", [System.Text.RegularExpressions.RegexOptions]::Singleline -bor [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        }
+
+        # Convert <b> and <strong> to **bold**
+        $md = [regex]::Replace($md, '<(?:b|strong)[^>]*>(.*?)</(?:b|strong)>', '**$1**', [System.Text.RegularExpressions.RegexOptions]::Singleline -bor [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+
+        # Convert <i> and <em> to _italic_
+        $md = [regex]::Replace($md, '<(?:i|em)[^>]*>(.*?)</(?:i|em)>', '_$1_', [System.Text.RegularExpressions.RegexOptions]::Singleline -bor [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+
+        # Convert <u> to markdown (no native underline, use emphasis)
+        $md = [regex]::Replace($md, '<u[^>]*>(.*?)</u>', '_$1_', [System.Text.RegularExpressions.RegexOptions]::Singleline -bor [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+
+        # Convert <a href="url">text</a> to [text](url)
+        $md = [regex]::Replace($md, '<a\s[^>]*href\s*=\s*"([^"]*)"[^>]*>(.*?)</a>', '[$2]($1)', [System.Text.RegularExpressions.RegexOptions]::Singleline -bor [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        $md = [regex]::Replace($md, "<a\s[^>]*href\s*=\s*'([^']*)'[^>]*>(.*?)</a>", '[$2]($1)', [System.Text.RegularExpressions.RegexOptions]::Singleline -bor [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+
+        # Convert images to markdown
+        $md = [regex]::Replace($md, '<img\s[^>]*src\s*=\s*"([^"]*)"[^>]*alt\s*=\s*"([^"]*)"[^>]*/?\s*>', '![$2]($1)', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        $md = [regex]::Replace($md, '<img\s[^>]*src\s*=\s*"([^"]*)"[^>]*/?\s*>', '![image]($1)', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+
+        # Convert unordered lists
+        $md = [regex]::Replace($md, '<li[^>]*>(.*?)</li>', "- `$1`n", [System.Text.RegularExpressions.RegexOptions]::Singleline -bor [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        $md = [regex]::Replace($md, '</?[uo]l[^>]*>', "`n", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+
+        # --- Table conversion ---
+        $md = [regex]::Replace($md, '<table[^>]*>(.*?)</table>', {
+            param($tableMatch)
+            $tableHtml = $tableMatch.Groups[1].Value
+
+            $rows = [regex]::Matches($tableHtml, '<tr[^>]*>(.*?)</tr>', [System.Text.RegularExpressions.RegexOptions]::Singleline -bor [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+            if ($rows.Count -eq 0) { return '' }
+
+            $mdRows = @()
+            foreach ($row in $rows) {
+                $cells = [regex]::Matches($row.Groups[1].Value, '<t[hd][^>]*>(.*?)</t[hd]>', [System.Text.RegularExpressions.RegexOptions]::Singleline -bor [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+                $cellTexts = @()
+                foreach ($cell in $cells) {
+                    $cellText = $cell.Groups[1].Value -replace '<[^>]+>', '' -replace '&nbsp;', ' '
+                    $cellText = $cellText.Trim()
+                    $cellTexts += $cellText
+                }
+                if ($cellTexts.Count -gt 0) {
+                    $mdRows += '| ' + ($cellTexts -join ' | ') + ' |'
+                }
+            }
+
+            if ($mdRows.Count -eq 0) { return '' }
+
+            # Insert separator after first row (header)
+            $colCount = ($mdRows[0] -split '\|').Count - 2  # minus leading/trailing empty
+            $sep = '| ' + (('---') * [Math]::Max(1, $colCount) -join ' | ') + ' |'
+            $result = "`n" + $mdRows[0] + "`n" + $sep
+            for ($idx = 1; $idx -lt $mdRows.Count; $idx++) {
+                $result += "`n" + $mdRows[$idx]
+            }
+            $result + "`n"
+        }, [System.Text.RegularExpressions.RegexOptions]::Singleline -bor [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+
+        # Convert block elements to newlines
+        $md = [regex]::Replace($md, '</?(?:p|div|tr|blockquote)[^>]*>', "`n", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+
+        # Decode common HTML entities
+        $md = $md -replace '&nbsp;', ' '
+        $md = $md -replace '&amp;', '&'
+        $md = $md -replace '&lt;', '<'
+        $md = $md -replace '&gt;', '>'
+        $md = $md -replace '&quot;', '"'
+        $md = $md -replace '&#39;', "'"
+        $md = $md -replace '&ndash;', '–'
+        $md = $md -replace '&mdash;', '—'
+        $md = $md -replace '&bull;', '•'
+        $md = $md -replace '&#\d+;', ''
+
+        # Strip all remaining HTML tags
+        $md = [regex]::Replace($md, '<[^>]+>', '')
+
+        # Clean up whitespace: collapse multiple blank lines to max 2
+        $md = [regex]::Replace($md, '(\r?\n\s*){3,}', "`n`n")
+
+        # Trim leading/trailing whitespace
+        $md = $md.Trim()
+
+        $md
+    }
+}
+
+function Save-OutlookMail {
+    <#
+    .SYNOPSIS
+    Save an Outlook email to disk in various formats.
+    .EXAMPLE
+    Save-OutlookMail -EntryID $id -Format MSG -DestinationPath C:\Temp
+    .EXAMPLE
+    Save-OutlookMail -EntryID $id -Format Markdown -DestinationPath C:\Temp
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$EntryID,
+
+        [ValidateSet('MSG', 'HTML', 'TXT', 'Markdown')]
+        [string]$Format = 'MSG',
+
+        [string]$DestinationPath = (Join-Path $env:USERPROFILE 'Downloads'),
+
+        [string]$FileName
+    )
+    if (-not $script:Namespace) { Connect-Outlook | Out-Null }
+    $item = $script:Namespace.GetItemFromID($EntryID)
+    if (-not $item) { throw "Mail item not found." }
+
+    if (-not (Test-Path $DestinationPath)) {
+        New-Item -Path $DestinationPath -ItemType Directory -Force | Out-Null
+    }
+
+    # Build safe filename from subject
+    $safeName = if ($FileName) { $FileName } else {
+        $s = $item.Subject -replace '[\\/:*?"<>|]', '_'
+        if ($s.Length -gt 80) { $s = $s.Substring(0, 80) }
+        $s
+    }
+
+    switch ($Format) {
+        'MSG' {
+            $path = Join-Path $DestinationPath "$safeName.msg"
+            $item.SaveAs($path, 3)  # olMSG = 3
+        }
+        'HTML' {
+            $path = Join-Path $DestinationPath "$safeName.html"
+            $item.SaveAs($path, 5)  # olHTML = 5
+        }
+        'TXT' {
+            $path = Join-Path $DestinationPath "$safeName.txt"
+            $item.SaveAs($path, 0)  # olTXT = 0
+        }
+        'Markdown' {
+            $path = Join-Path $DestinationPath "$safeName.md"
+            $header = @"
+# $($item.Subject)
+
+**From:** $($item.SenderName) <$($item.SenderEmailAddress)>
+**To:** $($item.To)
+$(if ($item.CC) { "**CC:** $($item.CC)`n" })**Date:** $($item.ReceivedTime)
+$(if ($item.Attachments.Count -gt 0) { "**Attachments:** $($item.Attachments | ForEach-Object { $_.FileName } | Join-String -Separator ', ')`n" })
+---
+
+"@
+            $body = ConvertTo-EmailMarkdown -Html $item.HTMLBody
+            Set-Content -Path $path -Value ($header + $body) -Encoding UTF8
+        }
+    }
+
+    Write-Host "Saved: $path" -ForegroundColor Green
+    [PSCustomObject]@{
+        Path     = $path
+        Format   = $Format
+        Subject  = $item.Subject
+        Size     = (Get-Item $path).Length
+    }
+}
+
 Export-ModuleMember -Function Connect-Outlook, Disconnect-Outlook, Get-OutlookProfile,
     Get-OutlookFolder, Get-OutlookMail, Read-OutlookMail, Save-OutlookAttachment,
-    Send-OutlookReply, Send-OutlookMail
+    Send-OutlookReply, Send-OutlookMail, ConvertTo-EmailMarkdown, Save-OutlookMail
