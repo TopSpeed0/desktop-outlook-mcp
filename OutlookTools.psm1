@@ -132,6 +132,11 @@ function Get-OutlookMail {
         if ($collected -ge $Count) { break }
         if ($item.Class -ne 43) { continue } # 43 = olMail
         if ($UnreadOnly -and $item.UnRead -eq $false) { continue }
+        # Encrypted/rights-managed items return null from folder collection — resolve fully
+        if (-not $item.Subject -and $item.EntryID) {
+            try { $item = $script:Namespace.GetItemFromID($item.EntryID) } catch {}
+        }
+
         if ($From -and $item.SenderEmailAddress -notmatch $From -and $item.SenderName -notmatch $From) { continue }
         if ($Subject -and $item.Subject -notmatch $Subject) { continue }
 
