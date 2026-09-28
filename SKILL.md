@@ -28,11 +28,13 @@ Import-Module <path-to>\OutlookTools.psm1; Connect-Outlook
 | `Disconnect-Outlook` | Release the COM object. |
 | `Get-OutlookProfile` | List all mailboxes/profiles configured in Outlook. |
 | `Get-OutlookFolder [-Mailbox] [-FolderPath]` | Browse folders. Shows name, item count, unread count. |
-| `Get-OutlookMail [-Mailbox] [-FolderPath] [-Count] [-UnreadOnly] [-From] [-Subject]` | List emails with filters. Returns Index, EntryID, Subject, From, Date, preview. |
+| `Get-OutlookMail [-Mailbox] [-FolderPath] [-Count] [-UnreadOnly] [-From] [-Subject]` | List emails with filters. Returns Index, EntryID, Subject, From, Date, preview. Plain-text filters are pushed down to MAPI via `Restrict()`; regex filters fall back to a client-side walk. |
+| `Get-OutlookCalendar [-Mailbox] [-Start] [-Days] [-Count] [-IncludeBody]` | Read appointments and meetings. Default: next 7 days, 30 items. Expands recurring series. Returns Subject, Start, End, Duration, Location, Organizer, IsRecurring, AllDayEvent, BusyStatus, Attendees, EntryID. |
+| `New-OutlookAppointment -Subject -Start [-Minutes] [-Location] [-Body] [-Attendees] [-AllDay] [-BusyStatus] [-ReminderMinutes] [-Save] [-Send]` | Create an appointment, or a meeting when `-Attendees` is given. Opens for review by default; `-Save` commits silently, `-Send` dispatches invitations. |
 | `Read-OutlookMail -EntryID <id> [-IncludeHTML] [-AsMarkdown] [-MaxBodyLength <int>]` | Full email: body (text), attachments, CC. Use `-AsMarkdown` for clean Markdown output (best for AI). Use `-IncludeHTML` only when you need HTML (e.g. for reply). Use `-MaxBodyLength 2000` to truncate long bodies. |
 | `Save-OutlookAttachment -EntryID <id> [-DestinationPath] [-FileNameFilter]` | Save attachments to disk. Default destination: `~/Downloads`. Filter by regex (e.g. `'\.pdf$'`). |
-| `Send-OutlookReply -EntryID <id> -Body <html> [-ReplyAll] [-Send]` | Reply to an email. Opens draft by default; `-Send` sends immediately. |
-| `Send-OutlookMail -To <addr> -Subject <text> -Body <text> [-CC] [-Attachments] [-HTML] [-Send]` | Compose new email. Opens draft by default; `-Send` sends immediately. |
+| `Send-OutlookReply -EntryID <id> -Body <html> [-ReplyAll] [-Send] [-Unencrypted] [-KeepLabel]` | Reply to an email. Opens draft by default; `-Send` sends immediately. Auto-clears the MIP label when a recipient is external. |
+| `Send-OutlookMail -To <addr> -Subject <text> -Body <text> [-CC] [-BCC] [-Attachments] [-HTML] [-Send] [-Unencrypted] [-KeepLabel]` | Compose new email. Opens draft by default; `-Send` sends immediately. Auto-clears the MIP label when a recipient is external. |
 | `ConvertTo-EmailMarkdown -Html <string>` | Convert Outlook HTML to clean Markdown. Strips MSO/Word CSS bloat, converts tables/bold/italic/links/lists to Markdown syntax, decodes HTML entities. Pipeline: `Read-OutlookMail -EntryID $id -IncludeHTML \| ConvertTo-EmailMarkdown` |
 | `Save-OutlookMail -EntryID <id> -Format <MSG\|HTML\|TXT\|Markdown> [-DestinationPath]` | Save email to file. MSG = lossless, HTML = raw, TXT = plain text, Markdown = clean .md with metadata header. Default: `~/Downloads`. |
 
@@ -113,6 +115,31 @@ Save-OutlookMail -EntryID $mail.EntryID -Format Markdown -DestinationPath C:\Tem
 
 # New email
 Send-OutlookMail -To 'someone@company.com' -Subject 'Report' -Body '<b>Attached.</b>' -HTML -Attachments 'C:\report.pdf' -Send
+
+# External recipient — label cleared automatically so they can read it
+Send-OutlookMail -To 'partner@vendor.com' -Subject 'Specs' -Body 'See attached.' -Send
+
+# Force unencrypted / force keep the label
+Send-OutlookMail -To 'partner@vendor.com' -Subject 'Specs' -Body '...' -Unencrypted -Send
+Send-OutlookMail -To 'partner@vendor.com' -Subject 'Confidential' -Body '...' -KeepLabel -Send
+
+# Calendar — next 7 days
+Get-OutlookCalendar
+
+# Calendar — next 30 days, up to 100 items, including bodies
+Get-OutlookCalendar -Days 30 -Count 100 -IncludeBody
+
+# Calendar — look back over the past week
+Get-OutlookCalendar -Start (Get-Date).AddDays(-7) -Days 7
+
+# Create an appointment (opens for review)
+New-OutlookAppointment -Subject 'Maintenance window' -Start '2026-08-03 22:00' -Minutes 120 -Location 'DC1'
+
+# Create and save silently
+New-OutlookAppointment -Subject 'Focus block' -Start '2026-08-04 09:00' -Minutes 90 -BusyStatus Busy -Save
+
+# Send a meeting invitation
+New-OutlookAppointment -Subject 'Design review' -Start '2026-08-05 10:00' -Attendees 'alice@company.com','bob@company.com' -Send
 ```
 
 **IMPORTANT:** Do NOT call Outlook COM methods directly (e.g. `$item.GetInspector`, `$namespace.GetItemFromID`). Always use the module functions — they handle connection, mailbox resolution, and cleanup.
@@ -146,11 +173,68 @@ When composing or replying to emails, always use professional styled HTML:
 - Inline styles only — Outlook ignores `<style>` blocks
 - No Word/MSO bloat — keep HTML clean and minimal
 - Tone: professional but concise, not overly formal
+- **No sign-off — ever.** Do not end with `Regards,` / `Thanks,` / `Best,` or the
+  sender's name. Outlook appends the user's real signature on send, so a written one
+  duplicates it. End on the last substantive sentence. This applies to replies too.
+
+## Sensitivity Labels & External Recipients
+
+Outlook applies a MIP sensitivity label on send, and if that label has IRM enabled the
+message is encrypted. **External recipients cannot read it.** Both send functions handle
+this automatically:
+
+- **Internal only** (domains in `internalDomains`) — label left in place, mail is encrypted.
+- **Any external recipient** — the label is cleared and `Permission = 0` set, so the mail
+  goes out readable. A yellow warning names the external addresses.
+- `-Unencrypted` — force the label to be cleared regardless of recipients.
+- `-KeepLabel` — force the label to be kept, even for external recipients.
+
+Configure the internal domain list in `outlook-config.json`:
+
+```json
+{
+  "mailbox": "Your.Name@company.com",
+  "internalDomains": ["company.com", "subsidiary.com"]
+}
+```
+
+Subdomains of an internal domain count as internal (`mail.company.com` matches
+`company.com`), but lookalikes do not (`notcompany.com` is external).
+
+**`internalDomains` is empty by default.** Until you configure it, no recipient is
+classified as external and the label is always kept — a warning is emitted once per
+session. That direction is deliberate: an unconfigured install must not silently strip
+protection from every message you send. Use `-Unencrypted` per message in the meantime.
+
+**When an address cannot be resolved to SMTP, it is treated as internal** — the label is
+kept. Keeping a label unnecessarily only makes the mail unreadable; clearing one
+unnecessarily could expose protected content. The failure mode is deliberate.
+
+Both functions return `Encryption` (`Cleared` or `LabelKept`) and `ExternalRecipients`
+so the caller can confirm what happened.
+
+## Performance Notes
+
+`Get-OutlookMail` translates plain-text `-Subject`, `-From`, and `-UnreadOnly` filters into
+a DASL `@SQL=` query and pushes them into MAPI via `Items.Restrict()` before walking the
+folder. On a large mailbox this is the difference between filtering thousands of items
+in Outlook and marshalling them all across COM.
+
+Filters containing regex metacharacters (`^ $ . | ? * + ( ) [ ] { } \`) are **not** pushed
+down — DASL `LIKE` would interpret them literally and change the result. Those fall back
+to the client-side walk, so regex support is unchanged. Any `Restrict()` failure also
+falls back silently. Use `-Verbose` to see which path ran.
+
+`-From` matches sender display name **or** SMTP address in both paths.
 
 ## Safety
 
 - `Send-OutlookReply` and `Send-OutlookMail` open a **draft** by default. Add `-Send` to send immediately.
-- Both support `-WhatIf` and `-Confirm` via `SupportsShouldProcess`.
+- `New-OutlookAppointment` opens for review by default. `-Save` commits, `-Send` invites attendees.
+- All support `-WhatIf` and `-Confirm` via `SupportsShouldProcess`.
+- `-WhatIf` (or declining `-Confirm`) discards the item and leaves **no draft behind**. It
+  returns `Status = 'NotSent'` and `Encryption = 'Would be: ...'` so you can see what the
+  send would have done. The label is never actually modified on that path.
 - The AI should always show the user what it intends to send before using `-Send`.
 
 ## Components
