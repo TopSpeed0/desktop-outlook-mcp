@@ -2,12 +2,178 @@ $script:Outlook = $null
 $script:Namespace = $null
 $script:ModuleRoot = $PSScriptRoot
 $script:DefaultMailbox = $null
+# Domains treated as internal for sensitivity-label purposes. Set 'internalDomains'
+# in outlook-config.json. When it is not configured, no recipient is classified as
+# external and the label is always kept -- see Test-ExternalRecipient.
+$script:InternalDomains = @()
+
+# MAPI property holding the MIP (Microsoft Information Protection) sensitivity label.
+# A label with IRM enabled encrypts the message; external recipients cannot read it.
+$script:MipLabelProperty = 'http://schemas.microsoft.com/mapi/string/{00020386-0000-0000-C000-000000000046}/msip_labels'
+
+# DASL property URIs for MAPI-side filtering via Items.Restrict()
+$script:Dasl = @{
+    Subject     = 'urn:schemas:httpmail:subject'
+    SenderName  = 'urn:schemas:httpmail:sendername'
+    SenderEmail = 'urn:schemas:httpmail:fromemail'
+    Read        = 'urn:schemas:httpmail:read'
+}
 
 $cfgPath = Join-Path $PSScriptRoot 'outlook-config.json'
 if (Test-Path $cfgPath) {
     $cfg = Get-Content $cfgPath -Raw | ConvertFrom-Json
     $script:DefaultMailbox = $cfg.mailbox
+    if ($cfg.internalDomains) { $script:InternalDomains = @($cfg.internalDomains) }
 }
+
+# ---------------------------------------------------------------------------
+# Private helpers (not exported)
+# ---------------------------------------------------------------------------
+
+# True when the pattern contains no regex metacharacters, i.e. it is safe to
+# translate into a DASL LIKE '%...%' prefilter without changing match semantics.
+function Test-PlainTextPattern {
+    param([string]$Pattern)
+    return $Pattern -notmatch '[\\^$.|?*+()\[\]{}]'
+}
+
+function New-DaslLikeClause {
+    param([string]$Property, [string]$Value)
+    # DASL string literals are single-quoted; embedded quotes are doubled.
+    '"' + $Property + '" LIKE ' + "'%" + ($Value -replace "'", "''") + "%'"
+}
+
+function New-DaslEqualsClause {
+    param([string]$Property, [int]$Value)
+    '"' + $Property + '" = ' + $Value
+}
+
+# Outlook's Restrict() date literals are locale-sensitive. Always format with
+# the invariant culture in the form Outlook parses reliably.
+function Format-OutlookDate {
+    param([datetime]$Date)
+    $Date.ToString('MM/dd/yyyy hh:mm tt', [System.Globalization.CultureInfo]::InvariantCulture)
+}
+
+# Resolve a Recipient to an SMTP address. Exchange recipients often expose an
+# X500/EX legacy DN instead, in which case we ask the directory for the primary
+# SMTP address. Returns $null when it cannot be resolved.
+function Resolve-RecipientSmtp {
+    param($Recipient)
+    $addr = $null
+    try { $addr = $Recipient.Address } catch {}
+    if ($addr -and $addr -match '@') { return $addr }
+    try {
+        $entry = $Recipient.AddressEntry
+        if ($entry) {
+            $user = $entry.GetExchangeUser()
+            if ($user -and $user.PrimarySmtpAddress) { return $user.PrimarySmtpAddress }
+        }
+    }
+    catch {}
+    return $null
+}
+
+# Extract e-mail addresses from a free-text recipient string ("a@b.com; c@d.com").
+function Get-AddressesFromString {
+    param([string]$Text)
+    if (-not $Text) { return @() }
+    [regex]::Matches($Text, '[\w.+\-'']+@[\w\-]+(?:\.[\w\-]+)+') | ForEach-Object { $_.Value }
+}
+
+# Classify a set of addresses against $script:InternalDomains.
+# Unresolvable addresses are treated as INTERNAL on purpose: keeping a label we
+# should have cleared only makes the mail unreadable, while clearing a label we
+# should have kept could expose protected content. Fail toward protection.
+function Test-ExternalRecipient {
+    param([string[]]$Addresses)
+
+    # With no internal domain list we cannot tell internal from external. Report no
+    # external recipients so the label is kept, rather than stripping protection from
+    # every message. Warn once so the misconfiguration is visible.
+    if (-not $script:InternalDomains -or $script:InternalDomains.Count -eq 0) {
+        if (-not $script:WarnedNoInternalDomains) {
+            Write-Warning "No 'internalDomains' configured in outlook-config.json - sensitivity labels will always be kept. External recipients may be unable to read your mail; use -Unencrypted to override per message."
+            $script:WarnedNoInternalDomains = $true
+        }
+        return [PSCustomObject]@{ HasExternal = $false; External = @() }
+    }
+
+    $external = @()
+    foreach ($a in $Addresses) {
+        if (-not $a -or $a -notmatch '@') { continue }
+        $domain = ($a -split '@')[-1].Trim().TrimEnd('>').ToLowerInvariant()
+        $isInternal = $false
+        foreach ($d in $script:InternalDomains) {
+            $d = $d.Trim().ToLowerInvariant()
+            if ($domain -eq $d -or $domain.EndsWith(".$d")) { $isInternal = $true; break }
+        }
+        if (-not $isInternal) { $external += $a }
+    }
+    return [PSCustomObject]@{
+        HasExternal = ($external.Count -gt 0)
+        External    = $external
+    }
+}
+
+# Strip the MIP sensitivity label and IRM restriction so external recipients can
+# read the message. Save() must run after clearing, otherwise Outlook re-applies
+# the policy label during Send().
+function Clear-OutlookSensitivityLabel {
+    param($MailItem)
+    try { $MailItem.Permission = 0 } catch { Write-Warning "Could not set Permission = 0: $($_.Exception.Message)" }
+    try {
+        $MailItem.PropertyAccessor.SetProperty($script:MipLabelProperty, '')
+    }
+    catch {
+        Write-Warning "Could not clear MIP label: $($_.Exception.Message)"
+    }
+    try { $MailItem.Save() } catch { Write-Warning "Could not save after clearing label: $($_.Exception.Message)" }
+}
+
+# Decide whether the label should be cleared. PURE — mutates nothing, so it is safe
+# to call before ShouldProcess and under -WhatIf.
+function Get-OutlookEncryptionDecision {
+    param(
+        [string[]]$Addresses,
+        [switch]$Unencrypted,
+        [switch]$KeepLabel
+    )
+    if ($KeepLabel) {
+        return [PSCustomObject]@{ ShouldClear = $false; Encryption = 'LabelKept'; ExternalRecipients = @(); Reason = '-KeepLabel specified' }
+    }
+
+    $check = Test-ExternalRecipient -Addresses $Addresses
+
+    if ($Unencrypted) {
+        return [PSCustomObject]@{ ShouldClear = $true; Encryption = 'Cleared'; ExternalRecipients = $check.External; Reason = '-Unencrypted specified' }
+    }
+    if ($check.HasExternal) {
+        return [PSCustomObject]@{ ShouldClear = $true; Encryption = 'Cleared'; ExternalRecipients = $check.External; Reason = "external recipient(s): $($check.External -join ', ')" }
+    }
+    return [PSCustomObject]@{ ShouldClear = $false; Encryption = 'LabelKept'; ExternalRecipients = @(); Reason = 'all recipients internal' }
+}
+
+# Apply a decision. Call this ONLY once committed to sending or displaying — it calls
+# Save() on the item, which would otherwise leave a stray draft behind under -WhatIf.
+function Invoke-OutlookEncryptionDecision {
+    param($MailItem, $Decision)
+    if ($Decision.ShouldClear) {
+        Clear-OutlookSensitivityLabel -MailItem $MailItem
+        Write-Host "Sensitivity label cleared - $($Decision.Reason). Use -KeepLabel to override." -ForegroundColor Yellow
+    }
+    else {
+        Write-Verbose "Sensitivity label kept - $($Decision.Reason)."
+    }
+}
+
+# Discard an unsent, unsaved item so -WhatIf leaves no trace. olDiscard = 1.
+function Remove-UncommittedOutlookItem {
+    param($MailItem)
+    try { $MailItem.Close(1) } catch { Write-Verbose "Could not discard item: $($_.Exception.Message)" }
+}
+
+# ---------------------------------------------------------------------------
 
 function Connect-Outlook {
     [CmdletBinding()]
@@ -124,8 +290,42 @@ function Get-OutlookMail {
         $folder = $found
     }
 
+    # MAPI-side prefilter. Cuts the collection down inside Outlook before the
+    # client-side loop below walks it — the difference is large on big folders.
+    #
+    # Only plain-text values are translated: -From/-Subject accept regex, and a
+    # pattern like '^john' or 'a|b' would mean something different to DASL LIKE.
+    # When a regex is supplied we skip that clause and let the loop handle it, so
+    # match semantics never change. Any Restrict failure falls back to a full walk.
     $items = $folder.Items
-    $items.Sort('[ReceivedTime]', $true)
+    $clauses = @()
+    if ($UnreadOnly) {
+        $clauses += New-DaslEqualsClause -Property $script:Dasl.Read -Value 0
+    }
+    if ($Subject -and (Test-PlainTextPattern $Subject)) {
+        $clauses += New-DaslLikeClause -Property $script:Dasl.Subject -Value $Subject
+    }
+    if ($From -and (Test-PlainTextPattern $From)) {
+        # The loop matches SenderName OR SenderEmailAddress, so the prefilter must too.
+        $clauses += '(' +
+            (New-DaslLikeClause -Property $script:Dasl.SenderName  -Value $From) + ' OR ' +
+            (New-DaslLikeClause -Property $script:Dasl.SenderEmail -Value $From) + ')'
+    }
+
+    if ($clauses.Count -gt 0) {
+        $filter = '@SQL=' + ($clauses -join ' AND ')
+        try {
+            $items = $folder.Items.Restrict($filter)
+            Write-Verbose "DASL prefilter applied: $filter"
+        }
+        catch {
+            Write-Verbose "Restrict() failed, falling back to full folder walk: $($_.Exception.Message)"
+            $items = $folder.Items
+        }
+    }
+
+    try { $items.Sort('[ReceivedTime]', $true) }
+    catch { Write-Verbose "Sort failed on this collection: $($_.Exception.Message)" }
 
     $collected = 0
     foreach ($item in $items) {
@@ -252,7 +452,11 @@ function Send-OutlookReply {
 
         [switch]$ReplyAll,
 
-        [switch]$Send
+        [switch]$Send,
+
+        [switch]$Unencrypted,
+
+        [switch]$KeepLabel
     )
     if (-not $script:Namespace) { Connect-Outlook | Out-Null }
     $item = $script:Namespace.GetItemFromID($EntryID)
@@ -261,18 +465,38 @@ function Send-OutlookReply {
     $reply = if ($ReplyAll) { $item.ReplyAll() } else { $item.Reply() }
     $reply.HTMLBody = $Body + $reply.HTMLBody
 
-    if ($Send) {
-        if ($PSCmdlet.ShouldProcess("Reply to '$($item.Subject)' from $($item.SenderName)", "Send")) {
-            $reply.Send()
-            Write-Host "Reply sent to '$($item.Subject)'." -ForegroundColor Green
-            return [PSCustomObject]@{ Status = 'Sent'; Subject = $item.Subject; To = $item.SenderName }
+    # Collect the actual recipients Outlook put on the reply, resolving Exchange
+    # legacy DNs to SMTP so external detection is accurate.
+    $addresses = @()
+    try {
+        foreach ($r in $reply.Recipients) {
+            try { $r.Resolve() | Out-Null } catch {}
+            $smtp = Resolve-RecipientSmtp -Recipient $r
+            if ($smtp) { $addresses += $smtp }
         }
     }
-    else {
-        $reply.Display()
-        Write-Host "Reply draft opened for '$($item.Subject)'." -ForegroundColor Cyan
-        return [PSCustomObject]@{ Status = 'Draft'; Subject = $item.Subject; To = $item.SenderName }
+    catch { Write-Verbose "Could not enumerate reply recipients: $($_.Exception.Message)" }
+    if (-not $addresses) { $addresses = Get-AddressesFromString -Text $reply.To }
+
+    $decision = Get-OutlookEncryptionDecision -Addresses $addresses `
+        -Unencrypted:$Unencrypted -KeepLabel:$KeepLabel
+
+    if ($Send) {
+        if ($PSCmdlet.ShouldProcess("Reply to '$($item.Subject)' from $($item.SenderName)", "Send")) {
+            Invoke-OutlookEncryptionDecision -MailItem $reply -Decision $decision
+            $reply.Send()
+            Write-Host "Reply sent to '$($item.Subject)'." -ForegroundColor Green
+            return [PSCustomObject]@{ Status = 'Sent'; Subject = $item.Subject; To = $item.SenderName; Recipients = $addresses; Encryption = $decision.Encryption; ExternalRecipients = $decision.ExternalRecipients }
+        }
+        # -WhatIf / declined at the -Confirm prompt: discard, change nothing.
+        Remove-UncommittedOutlookItem -MailItem $reply
+        return [PSCustomObject]@{ Status = 'NotSent'; Subject = $item.Subject; To = $item.SenderName; Recipients = $addresses; Encryption = "Would be: $($decision.Encryption)"; ExternalRecipients = $decision.ExternalRecipients }
     }
+
+    Invoke-OutlookEncryptionDecision -MailItem $reply -Decision $decision
+    $reply.Display()
+    Write-Host "Reply draft opened for '$($item.Subject)'." -ForegroundColor Cyan
+    [PSCustomObject]@{ Status = 'Draft'; Subject = $item.Subject; To = $item.SenderName; Recipients = $addresses; Encryption = $decision.Encryption; ExternalRecipients = $decision.ExternalRecipients }
 }
 
 function Send-OutlookMail {
@@ -289,11 +513,17 @@ function Send-OutlookMail {
 
         [string]$CC,
 
+        [string]$BCC,
+
         [string[]]$Attachments,
 
         [switch]$HTML,
 
-        [switch]$Send
+        [switch]$Send,
+
+        [switch]$Unencrypted,
+
+        [switch]$KeepLabel
     )
     if (-not $script:Outlook) { Connect-Outlook | Out-Null }
 
@@ -301,6 +531,7 @@ function Send-OutlookMail {
     $mail.To = $To
     $mail.Subject = $Subject
     if ($CC) { $mail.CC = $CC }
+    if ($BCC) { $mail.BCC = $BCC }
     if ($HTML) { $mail.HTMLBody = $Body } else { $mail.Body = $Body }
 
     foreach ($att in $Attachments) {
@@ -308,18 +539,197 @@ function Send-OutlookMail {
         else { Write-Warning "Attachment not found: $att" }
     }
 
+    $addresses = @(Get-AddressesFromString -Text $To) +
+                 @(Get-AddressesFromString -Text $CC) +
+                 @(Get-AddressesFromString -Text $BCC)
+
+    $decision = Get-OutlookEncryptionDecision -Addresses $addresses `
+        -Unencrypted:$Unencrypted -KeepLabel:$KeepLabel
+
     if ($Send) {
         if ($PSCmdlet.ShouldProcess("Send mail '$Subject' to $To", "Send")) {
+            Invoke-OutlookEncryptionDecision -MailItem $mail -Decision $decision
             $mail.Send()
             Write-Host "Mail sent: '$Subject' to $To" -ForegroundColor Green
-            return [PSCustomObject]@{ Status = 'Sent'; Subject = $Subject; To = $To }
+            return [PSCustomObject]@{ Status = 'Sent'; Subject = $Subject; To = $To; Encryption = $decision.Encryption; ExternalRecipients = $decision.ExternalRecipients }
         }
+        # -WhatIf / declined at the -Confirm prompt: discard, change nothing.
+        Remove-UncommittedOutlookItem -MailItem $mail
+        return [PSCustomObject]@{ Status = 'NotSent'; Subject = $Subject; To = $To; Encryption = "Would be: $($decision.Encryption)"; ExternalRecipients = $decision.ExternalRecipients }
     }
-    else {
-        $mail.Display()
-        Write-Host "Draft opened: '$Subject' to $To" -ForegroundColor Cyan
-        return [PSCustomObject]@{ Status = 'Draft'; Subject = $Subject; To = $To }
+
+    Invoke-OutlookEncryptionDecision -MailItem $mail -Decision $decision
+    $mail.Display()
+    Write-Host "Draft opened: '$Subject' to $To" -ForegroundColor Cyan
+    [PSCustomObject]@{ Status = 'Draft'; Subject = $Subject; To = $To; Encryption = $decision.Encryption; ExternalRecipients = $decision.ExternalRecipients }
+}
+
+function Get-OutlookCalendar {
+    <#
+    .SYNOPSIS
+    Read calendar appointments and meetings within a date range.
+    .DESCRIPTION
+    Resolves the mailbox's default Calendar folder by ID rather than by name, so it
+    works on non-English Outlook installs. Expands recurring series.
+    .EXAMPLE
+    Get-OutlookCalendar
+    .EXAMPLE
+    Get-OutlookCalendar -Days 30 -Count 100
+    .EXAMPLE
+    Get-OutlookCalendar -Start (Get-Date).AddDays(-7) -Days 7
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$Mailbox = $script:DefaultMailbox,
+
+        [datetime]$Start = (Get-Date),
+
+        [int]$Days = 7,
+
+        [int]$Count = 30,
+
+        [switch]$IncludeBody
+    )
+    if (-not $script:Namespace) { Connect-Outlook | Out-Null }
+
+    # olFolderCalendar = 9. Resolve via the mailbox's Store so this works for
+    # secondary mailboxes and on localised Outlook installs (folder name varies).
+    $cal = $null
+    if ($Mailbox) {
+        try {
+            $root = $script:Namespace.Session.Folders.Item($Mailbox)
+            if ($root -and $root.Store) { $cal = $root.Store.GetDefaultFolder(9) }
+        }
+        catch { Write-Verbose "Store.GetDefaultFolder(9) failed for '$Mailbox': $($_.Exception.Message)" }
     }
+    if (-not $cal) { $cal = $script:Namespace.GetDefaultFolder(9) }
+    if (-not $cal) { throw "Could not resolve the Calendar folder." }
+
+    $items = $cal.Items
+
+    # IncludeRecurrences MUST be set before Sort(), and the collection must be
+    # sorted by [Start] ascending, or recurring appointments are silently omitted.
+    $items.IncludeRecurrences = $true
+    $items.Sort('[Start]')
+
+    $from = Format-OutlookDate -Date $Start
+    $to   = Format-OutlookDate -Date $Start.AddDays($Days)
+    $filter = "[Start] >= '$from' AND [Start] <= '$to'"
+
+    try {
+        $filtered = $items.Restrict($filter)
+    }
+    catch {
+        throw "Calendar Restrict() failed with filter [$filter]: $($_.Exception.Message)"
+    }
+
+    $collected = 0
+    foreach ($appt in $filtered) {
+        if ($collected -ge $Count) { break }
+        if ($appt.Class -ne 26) { continue } # 26 = olAppointment
+
+        $result = [ordered]@{
+            Subject      = $appt.Subject
+            Start        = $appt.Start
+            End          = $appt.End
+            Duration     = $appt.Duration      # minutes
+            Location     = $appt.Location
+            Organizer    = $appt.Organizer
+            IsRecurring  = $appt.IsRecurring
+            AllDayEvent  = $appt.AllDayEvent
+            BusyStatus   = switch ($appt.BusyStatus) { 0 { 'Free' } 1 { 'Tentative' } 2 { 'Busy' } 3 { 'OutOfOffice' } 4 { 'WorkingElsewhere' } default { $appt.BusyStatus } }
+            Attendees    = $appt.RequiredAttendees
+            EntryID      = $appt.EntryID
+        }
+        if ($IncludeBody) { $result['Body'] = $appt.Body }
+
+        [PSCustomObject]$result
+        $collected++
+    }
+}
+
+function New-OutlookAppointment {
+    <#
+    .SYNOPSIS
+    Create a calendar appointment, or a meeting when -Attendees is supplied.
+    .DESCRIPTION
+    Opens the item for review by default. Add -Save to commit it silently, or
+    -Send to dispatch meeting invitations to attendees.
+    .EXAMPLE
+    New-OutlookAppointment -Subject 'Maintenance window' -Start '2026-08-03 22:00' -Minutes 120
+    .EXAMPLE
+    New-OutlookAppointment -Subject 'Design review' -Start '2026-08-03 10:00' -Attendees 'alice@company.com' -Send
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Subject,
+
+        [Parameter(Mandatory)]
+        [datetime]$Start,
+
+        [int]$Minutes = 30,
+
+        [string]$Location,
+
+        [string]$Body,
+
+        [string[]]$Attendees,
+
+        [switch]$AllDay,
+
+        [ValidateSet('Free', 'Tentative', 'Busy', 'OutOfOffice', 'WorkingElsewhere')]
+        [string]$BusyStatus = 'Busy',
+
+        [int]$ReminderMinutes = 15,
+
+        [switch]$Save,
+
+        [switch]$Send
+    )
+    if (-not $script:Outlook) { Connect-Outlook | Out-Null }
+
+    $appt = $script:Outlook.CreateItem(1) # olAppointmentItem
+    $appt.Subject = $Subject
+    $appt.Start = $Start
+    if ($AllDay) { $appt.AllDayEvent = $true } else { $appt.Duration = $Minutes }
+    if ($Location) { $appt.Location = $Location }
+    if ($Body) { $appt.Body = $Body }
+    $appt.BusyStatus = @{ Free = 0; Tentative = 1; Busy = 2; OutOfOffice = 3; WorkingElsewhere = 4 }[$BusyStatus]
+    if ($ReminderMinutes -gt 0) {
+        $appt.ReminderSet = $true
+        $appt.ReminderMinutesBeforeStart = $ReminderMinutes
+    }
+
+    if ($Attendees) {
+        $appt.MeetingStatus = 1 # olMeeting — required before adding recipients
+        foreach ($a in $Attendees) { $appt.Recipients.Add($a) | Out-Null }
+        try { $appt.Recipients.ResolveAll() | Out-Null } catch {}
+    }
+
+    $when = $Start.ToString('yyyy-MM-dd HH:mm')
+
+    if ($Send -and $Attendees) {
+        if ($PSCmdlet.ShouldProcess("Meeting '$Subject' at $when to $($Attendees -join ', ')", "Send invitation")) {
+            $appt.Send()
+            Write-Host "Meeting invitation sent: '$Subject' at $when" -ForegroundColor Green
+            return [PSCustomObject]@{ Status = 'Sent'; Subject = $Subject; Start = $Start; Attendees = $Attendees }
+        }
+        return
+    }
+
+    if ($Save) {
+        if ($PSCmdlet.ShouldProcess("Appointment '$Subject' at $when", "Save to calendar")) {
+            $appt.Save()
+            Write-Host "Appointment saved: '$Subject' at $when" -ForegroundColor Green
+            return [PSCustomObject]@{ Status = 'Saved'; Subject = $Subject; Start = $Start; EntryID = $appt.EntryID }
+        }
+        return
+    }
+
+    $appt.Display()
+    Write-Host "Appointment draft opened: '$Subject' at $when" -ForegroundColor Cyan
+    [PSCustomObject]@{ Status = 'Draft'; Subject = $Subject; Start = $Start }
 }
 
 function ConvertTo-EmailMarkdown {
@@ -529,4 +939,5 @@ $(if ($item.Attachments.Count -gt 0) { "**Attachments:** $($item.Attachments | F
 
 Export-ModuleMember -Function Connect-Outlook, Disconnect-Outlook, Get-OutlookProfile,
     Get-OutlookFolder, Get-OutlookMail, Read-OutlookMail, Save-OutlookAttachment,
-    Send-OutlookReply, Send-OutlookMail, ConvertTo-EmailMarkdown, Save-OutlookMail
+    Send-OutlookReply, Send-OutlookMail, ConvertTo-EmailMarkdown, Save-OutlookMail,
+    Get-OutlookCalendar, New-OutlookAppointment

@@ -1,3 +1,4 @@
 {
-  "mailbox": "Your.Name@company.com"
+  "mailbox": "Your.Name@company.com",
+  "internalDomains": ["company.com"]
 }
