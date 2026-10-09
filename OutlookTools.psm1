@@ -452,6 +452,8 @@ function Send-OutlookReply {
 
         [switch]$ReplyAll,
 
+        [string[]]$Attachments,
+
         [switch]$Send,
 
         [switch]$Unencrypted,
@@ -464,6 +466,11 @@ function Send-OutlookReply {
 
     $reply = if ($ReplyAll) { $item.ReplyAll() } else { $item.Reply() }
     $reply.HTMLBody = $Body + $reply.HTMLBody
+
+    foreach ($att in $Attachments) {
+        if (Test-Path $att) { $reply.Attachments.Add($att) | Out-Null }
+        else { Write-Warning "Attachment not found: $att" }
+    }
 
     # Collect the actual recipients Outlook put on the reply, resolving Exchange
     # legacy DNs to SMTP so external detection is accurate.
