@@ -944,7 +944,89 @@ $(if ($item.Attachments.Count -gt 0) { "**Attachments:** $($item.Attachments | F
     }
 }
 
+function Set-OutlookMeetingResponse {
+    <#
+    .SYNOPSIS
+        Accept / Tentative / Decline a meeting invitation.
+    .EXAMPLE
+        Get-OutlookCalendar -Days 14 | Where-Object Organizer -match 'Noga' |
+            Set-OutlookMeetingResponse -Response Accept -Send
+    #>
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
+    param(
+        [Parameter(Mandatory, ValueFromPipelineByPropertyName)]
+        [string]$EntryID,
+
+        [Parameter(Mandatory)]
+        [ValidateSet('Accept', 'Tentative', 'Decline')]
+        [string]$Response,
+
+        [string]$Comment,
+
+        # Occurrence start; used to target one occurrence of a recurring series
+        [Parameter(ValueFromPipelineByPropertyName)]
+        [Nullable[datetime]]$Start,
+
+        [switch]$Send,
+        [switch]$NoResponse
+    )
+    begin {
+        if (-not $script:Namespace) { Connect-Outlook | Out-Null }
+        $map = @{ Accept = 3; Tentative = 2; Decline = 4 }  # OlMeetingResponse
+    }
+    process {
+        $item = $script:Namespace.GetItemFromID($EntryID)
+
+        if ($item.MessageClass -like 'IPM.Schedule.Meeting.Request*') {
+            $item = $item.GetAssociatedAppointment($true)
+        }
+        if (-not $item -or $item.MessageClass -notlike 'IPM.Appointment*') {
+            throw "EntryID is not a meeting/appointment: $EntryID"
+        }
+
+        if ($item.IsRecurring -and $Start) {
+            $item = $item.GetRecurrencePattern().GetOccurrence([datetime]$Start)
+        }
+
+        # MeetingStatus: 0 = olNonMeeting, 1 = olMeeting (organizer), 3 = olMeetingReceived
+        if ($item.MeetingStatus -eq 0) {
+            throw "'$($item.Subject)' is not a meeting."
+        }
+        if ($item.MeetingStatus -eq 1) {
+            throw "You are the organizer of '$($item.Subject)' - nothing to respond to."
+        }
+
+        $target = "$($item.Subject) @ $($item.Start) (organizer: $($item.Organizer))"
+        if (-not $PSCmdlet.ShouldProcess($target, "$Response meeting")) {
+            return [pscustomobject]@{
+                Subject = $item.Subject; Start = $item.Start; Organizer = $item.Organizer
+                Response = $Response; Status = 'NotSent'
+            }
+        }
+
+        $reply = $item.Respond($map[$Response], $true, $false)
+
+        $status = 'CalendarOnly'
+        if ($reply -and -not $NoResponse) {
+            if ($Comment) { $reply.Body = $Comment }
+            if ($Send) { $reply.Send(); $status = 'Sent' }
+            else       { $reply.Display(); $status = 'DraftOpened' }
+        }
+
+        [pscustomobject]@{
+            Subject   = $item.Subject
+            Start     = $item.Start
+            Organizer = $item.Organizer
+            Response  = $Response
+            Status    = $status
+        }
+    }
+}
+
+Set-Alias -Name Respond-OutlookMeeting -Value Set-OutlookMeetingResponse
+
 Export-ModuleMember -Function Connect-Outlook, Disconnect-Outlook, Get-OutlookProfile,
     Get-OutlookFolder, Get-OutlookMail, Read-OutlookMail, Save-OutlookAttachment,
     Send-OutlookReply, Send-OutlookMail, ConvertTo-EmailMarkdown, Save-OutlookMail,
-    Get-OutlookCalendar, New-OutlookAppointment
+    Get-OutlookCalendar, New-OutlookAppointment, Set-OutlookMeetingResponse `
+    -Alias Respond-OutlookMeeting
