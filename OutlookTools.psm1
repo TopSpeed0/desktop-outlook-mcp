@@ -403,6 +403,43 @@ function Read-OutlookMail {
     [PSCustomObject]$result
 }
 
+function Set-OutlookMailRead {
+    <#
+    .SYNOPSIS
+        Mark emails as read (or unread with -Unread).
+    .EXAMPLE
+        Get-OutlookMail -UnreadOnly -From 'Jira' | Set-OutlookMailRead
+    #>
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Low')]
+    param(
+        [Parameter(Mandatory, ValueFromPipelineByPropertyName)]
+        [string]$EntryID,
+
+        [switch]$Unread
+    )
+    begin {
+        if (-not $script:Namespace) { Connect-Outlook | Out-Null }
+        $state = if ($Unread) { 'unread' } else { 'read' }
+    }
+    process {
+        $item = $script:Namespace.GetItemFromID($EntryID)
+        if (-not $item) { throw "Mail item not found." }
+
+        if ($PSCmdlet.ShouldProcess("$($item.SenderName) | $($item.Subject)", "Mark as $state")) {
+            if ($item.UnRead -ne [bool]$Unread) {
+                $item.UnRead = [bool]$Unread
+                $item.Save()
+            }
+        }
+
+        [pscustomobject]@{
+            Subject = $item.Subject
+            From    = $item.SenderName
+            UnRead  = $item.UnRead
+        }
+    }
+}
+
 function Save-OutlookAttachment {
     [CmdletBinding()]
     param(
@@ -1026,7 +1063,7 @@ function Set-OutlookMeetingResponse {
 Set-Alias -Name Respond-OutlookMeeting -Value Set-OutlookMeetingResponse
 
 Export-ModuleMember -Function Connect-Outlook, Disconnect-Outlook, Get-OutlookProfile,
-    Get-OutlookFolder, Get-OutlookMail, Read-OutlookMail, Save-OutlookAttachment,
+    Get-OutlookFolder, Get-OutlookMail, Read-OutlookMail, Set-OutlookMailRead, Save-OutlookAttachment,
     Send-OutlookReply, Send-OutlookMail, ConvertTo-EmailMarkdown, Save-OutlookMail,
     Get-OutlookCalendar, New-OutlookAppointment, Set-OutlookMeetingResponse `
     -Alias Respond-OutlookMeeting
