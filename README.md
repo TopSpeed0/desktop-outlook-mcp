@@ -150,7 +150,9 @@ Save-OutlookMail -EntryID $mail.EntryID -Format MSG -DestinationPath C:\Temp
 ## Safety
 
 - `Send-OutlookReply` and `Send-OutlookMail` open a draft by default; use `-Send` only when ready.
-- Both functions support `-WhatIf` and `-Confirm`.
+- Both functions support `-WhatIf` and `-Confirm`. `-WhatIf` never leaves a draft behind.
+- No sign-off in the body: Outlook adds your signature. `Send-OutlookReply` removes a trailing
+  `Thanks, <name>` when the signature is already there (`-KeepSignOff` to keep it).
 
 ## License
 

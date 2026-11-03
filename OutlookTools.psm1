@@ -173,6 +173,49 @@ function Remove-UncommittedOutlookItem {
     try { $MailItem.Close(1) } catch { Write-Verbose "Could not discard item: $($_.Exception.Message)" }
 }
 
+# Put the new text inside the reply's <body>, ahead of Outlook's signature and the quoted
+# thread. Prepending to HTMLBody would land it before <html>, outside the document.
+function Join-ReplyHtml {
+    param([string]$Body, [string]$ReplyHtml)
+    $m = [regex]::Match($ReplyHtml, '(?is)<body\b[^>]*>')
+    if ($m.Success) { return $ReplyHtml.Insert($m.Index + $m.Length, $Body) }
+    return $Body + $ReplyHtml
+}
+
+# True when Outlook already put the user's signature on the item (classic _MailAutoSig
+# bookmark, or the Signature div newer builds use).
+function Test-OutlookSignature {
+    param([string]$Html)
+    return [bool]($Html -match '(?i)_MailAutoSig|<div\b[^>]*\bid="?Signature\b')
+}
+
+# Remove a trailing "Thanks, / Regards, / Best, <Name>" that an AI wrote at the end of a
+# body. Only a sign-off at the start of a line or block counts, so "Confirmed, thanks."
+# stays. Returns the body unchanged if nothing matched or nothing else would be left.
+function Remove-TrailingSignOff {
+    param([string]$Html)
+    $word = '(?:thanks|thank you|many thanks|thx|regards|best regards|kind regards|warm regards|best|cheers|br)'
+    $gap  = '(?:\s|&nbsp;|<br\s*/?>|</?(?:p|div|span|b|strong|i|em|font)\b[^>]*>)*'
+    $name = '(?-i:\p{Lu}[\p{L}.''-]*(?:\s+\p{Lu}[\p{L}.''-]*)?)'
+    # Either "Thanks," + optional name, or "Thanks" alone on its line.
+    $rx   = "(?is)(?<=^|>)(?:\s|&nbsp;)*$word(?:\s*[,!.]$gap(?:$name$gap)?|$gap)$"
+    $m = [regex]::Match($Html, $rx)
+    if (-not $m.Success) { return $Html }
+
+    $kept = $Html.Substring(0, $m.Index)
+    $kept = [regex]::Replace($kept, '(?is)(?:\s|&nbsp;|<br\s*/?>|<(?:p|div)\b[^>]*>)+$', '')
+    $text = [regex]::Replace($kept, '<[^>]+>|&nbsp;|\s', '')
+    if (-not $text) { return $Html }
+
+    # Re-close any <p>/<div> whose closing tag went with the sign-off.
+    foreach ($tag in 'p', 'div') {
+        $open  = [regex]::Matches($kept, "(?i)<$tag\b").Count
+        $close = [regex]::Matches($kept, "(?i)</$tag>").Count
+        if ($open -gt $close) { $kept += "</$tag>" * ($open - $close) }
+    }
+    return $kept
+}
+
 # ---------------------------------------------------------------------------
 
 function Connect-Outlook {
@@ -495,14 +538,28 @@ function Send-OutlookReply {
 
         [switch]$Unencrypted,
 
-        [switch]$KeepLabel
+        [switch]$KeepLabel,
+
+        [switch]$KeepSignOff
     )
     if (-not $script:Namespace) { Connect-Outlook | Out-Null }
     $item = $script:Namespace.GetItemFromID($EntryID)
     if (-not $item) { throw "Mail item not found." }
 
     $reply = if ($ReplyAll) { $item.ReplyAll() } else { $item.Reply() }
-    $reply.HTMLBody = $Body + $reply.HTMLBody
+    $replyHtml = $reply.HTMLBody
+
+    # Outlook already added the user's signature, so a written sign-off would show twice.
+    $signOffRemoved = $false
+    if (-not $KeepSignOff -and (Test-OutlookSignature -Html $replyHtml)) {
+        $trimmed = Remove-TrailingSignOff -Html $Body
+        if ($trimmed -ne $Body) {
+            $Body = $trimmed
+            $signOffRemoved = $true
+            Write-Host "Removed the sign-off from the body - Outlook adds the signature. Use -KeepSignOff to override." -ForegroundColor Yellow
+        }
+    }
+    $reply.HTMLBody = Join-ReplyHtml -Body $Body -ReplyHtml $replyHtml
 
     foreach ($att in $Attachments) {
         if (Test-Path $att) { $reply.Attachments.Add($att) | Out-Null }
@@ -530,17 +587,24 @@ function Send-OutlookReply {
             Invoke-OutlookEncryptionDecision -MailItem $reply -Decision $decision
             $reply.Send()
             Write-Host "Reply sent to '$($item.Subject)'." -ForegroundColor Green
-            return [PSCustomObject]@{ Status = 'Sent'; Subject = $item.Subject; To = $item.SenderName; Recipients = $addresses; Encryption = $decision.Encryption; ExternalRecipients = $decision.ExternalRecipients }
+            return [PSCustomObject]@{ Status = 'Sent'; Subject = $item.Subject; To = $item.SenderName; Recipients = $addresses; Encryption = $decision.Encryption; ExternalRecipients = $decision.ExternalRecipients; SignOffRemoved = $signOffRemoved }
         }
         # -WhatIf / declined at the -Confirm prompt: discard, change nothing.
         Remove-UncommittedOutlookItem -MailItem $reply
-        return [PSCustomObject]@{ Status = 'NotSent'; Subject = $item.Subject; To = $item.SenderName; Recipients = $addresses; Encryption = "Would be: $($decision.Encryption)"; ExternalRecipients = $decision.ExternalRecipients }
+        return [PSCustomObject]@{ Status = 'NotSent'; Subject = $item.Subject; To = $item.SenderName; Recipients = $addresses; Encryption = "Would be: $($decision.Encryption)"; ExternalRecipients = $decision.ExternalRecipients; SignOffRemoved = $signOffRemoved }
+    }
+
+    # -WhatIf without -Send: show what would happen, but open no draft.
+    if ($WhatIfPreference) {
+        Write-Host "What if: Opening reply draft for '$($item.Subject)'." -ForegroundColor Cyan
+        Remove-UncommittedOutlookItem -MailItem $reply
+        return [PSCustomObject]@{ Status = 'NotSent'; Subject = $item.Subject; To = $item.SenderName; Recipients = $addresses; Encryption = "Would be: $($decision.Encryption)"; ExternalRecipients = $decision.ExternalRecipients; SignOffRemoved = $signOffRemoved }
     }
 
     Invoke-OutlookEncryptionDecision -MailItem $reply -Decision $decision
     $reply.Display()
     Write-Host "Reply draft opened for '$($item.Subject)'." -ForegroundColor Cyan
-    [PSCustomObject]@{ Status = 'Draft'; Subject = $item.Subject; To = $item.SenderName; Recipients = $addresses; Encryption = $decision.Encryption; ExternalRecipients = $decision.ExternalRecipients }
+    [PSCustomObject]@{ Status = 'Draft'; Subject = $item.Subject; To = $item.SenderName; Recipients = $addresses; Encryption = $decision.Encryption; ExternalRecipients = $decision.ExternalRecipients; SignOffRemoved = $signOffRemoved }
 }
 
 function Send-OutlookMail {
@@ -598,6 +662,13 @@ function Send-OutlookMail {
             return [PSCustomObject]@{ Status = 'Sent'; Subject = $Subject; To = $To; Encryption = $decision.Encryption; ExternalRecipients = $decision.ExternalRecipients }
         }
         # -WhatIf / declined at the -Confirm prompt: discard, change nothing.
+        Remove-UncommittedOutlookItem -MailItem $mail
+        return [PSCustomObject]@{ Status = 'NotSent'; Subject = $Subject; To = $To; Encryption = "Would be: $($decision.Encryption)"; ExternalRecipients = $decision.ExternalRecipients }
+    }
+
+    # -WhatIf without -Send: show what would happen, but open no draft.
+    if ($WhatIfPreference) {
+        Write-Host "What if: Opening draft '$Subject' to $To." -ForegroundColor Cyan
         Remove-UncommittedOutlookItem -MailItem $mail
         return [PSCustomObject]@{ Status = 'NotSent'; Subject = $Subject; To = $To; Encryption = "Would be: $($decision.Encryption)"; ExternalRecipients = $decision.ExternalRecipients }
     }

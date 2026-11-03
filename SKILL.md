@@ -2,6 +2,12 @@
 
 Read, search, and reply to Outlook emails via PowerShell COM automation. Works with any local Outlook desktop client (Windows).
 
+> **IRON RULE — no sign-off.** Never end a mail or reply with `Thanks,` / `Regards,` /
+> `Best,` or the user's name. Outlook adds the user's real signature, so a written one
+> shows up twice. End on the last real sentence. `Send-OutlookReply` strips a trailing
+> sign-off when Outlook has already added the signature (`-KeepSignOff` turns that off),
+> but write the body without one in the first place.
+
 ## Setup
 
 1. Clone this repo
@@ -35,7 +41,7 @@ Import-Module <path-to>\OutlookTools.psm1; Connect-Outlook
 | `Read-OutlookMail -EntryID <id> [-IncludeHTML] [-AsMarkdown] [-MaxBodyLength <int>]` | Full email: body (text), attachments, CC. Use `-AsMarkdown` for clean Markdown output (best for AI). Use `-IncludeHTML` only when you need HTML (e.g. for reply). Use `-MaxBodyLength 2000` to truncate long bodies. |
 | `Set-OutlookMailRead -EntryID <id> [-Unread]` | Mark emails as read (or unread with `-Unread`). Accepts pipeline from `Get-OutlookMail`. Supports `-WhatIf`. |
 | `Save-OutlookAttachment -EntryID <id> [-DestinationPath] [-FileNameFilter]` | Save attachments to disk. Default destination: `~/Downloads`. Filter by regex (e.g. `'\.pdf$'`). |
-| `Send-OutlookReply -EntryID <id> -Body <html> [-ReplyAll] [-Attachments] [-Send] [-Unencrypted] [-KeepLabel]` | Reply to an email. Opens draft by default; `-Send` sends immediately. Auto-clears the MIP label when a recipient is external. |
+| `Send-OutlookReply -EntryID <id> -Body <html> [-ReplyAll] [-Attachments] [-Send] [-Unencrypted] [-KeepLabel] [-KeepSignOff]` | Reply to an email. Opens draft by default; `-Send` sends immediately. Auto-clears the MIP label when a recipient is external. The body goes inside the reply's `<body>`, above Outlook's signature; a trailing sign-off is removed when that signature is present (`SignOffRemoved` in the result). |
 | `Send-OutlookMail -To <addr> -Subject <text> -Body <text> [-CC] [-BCC] [-Attachments] [-HTML] [-Send] [-Unencrypted] [-KeepLabel]` | Compose new email. Opens draft by default; `-Send` sends immediately. Auto-clears the MIP label when a recipient is external. |
 | `ConvertTo-EmailMarkdown -Html <string>` | Convert Outlook HTML to clean Markdown. Strips MSO/Word CSS bloat, converts tables/bold/italic/links/lists to Markdown syntax, decodes HTML entities. Pipeline: `Read-OutlookMail -EntryID $id -IncludeHTML \| ConvertTo-EmailMarkdown` |
 | `Save-OutlookMail -EntryID <id> -Format <MSG\|HTML\|TXT\|Markdown> [-DestinationPath]` | Save email to file. MSG = lossless, HTML = raw, TXT = plain text, Markdown = clean .md with metadata header. Default: `~/Downloads`. |
@@ -175,9 +181,8 @@ When composing or replying to emails, always use professional styled HTML:
 - Inline styles only — Outlook ignores `<style>` blocks
 - No Word/MSO bloat — keep HTML clean and minimal
 - Tone: professional but concise, not overly formal
-- **No sign-off — ever.** Do not end with `Regards,` / `Thanks,` / `Best,` or the
-  sender's name. Outlook appends the user's real signature on send, so a written one
-  duplicates it. End on the last substantive sentence. This applies to replies too.
+- **No sign-off — ever.** See the iron rule at the top. This applies to new mails and
+  replies alike.
 
 ## Sensitivity Labels & External Recipients
 
@@ -234,9 +239,9 @@ falls back silently. Use `-Verbose` to see which path ran.
 - `Send-OutlookReply` and `Send-OutlookMail` open a **draft** by default. Add `-Send` to send immediately.
 - `New-OutlookAppointment` opens for review by default. `-Save` commits, `-Send` invites attendees.
 - All support `-WhatIf` and `-Confirm` via `SupportsShouldProcess`.
-- `-WhatIf` (or declining `-Confirm`) discards the item and leaves **no draft behind**. It
-  returns `Status = 'NotSent'` and `Encryption = 'Would be: ...'` so you can see what the
-  send would have done. The label is never actually modified on that path.
+- `-WhatIf` (or declining `-Confirm`) discards the item and leaves **no draft behind**, with
+  or without `-Send`. It returns `Status = 'NotSent'` and `Encryption = 'Would be: ...'` so
+  you can see what the send would have done. The label is never actually modified on that path.
 - The AI should always show the user what it intends to send before using `-Send`.
 
 ## Components
