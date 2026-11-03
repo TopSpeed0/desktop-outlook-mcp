@@ -1,6 +1,23 @@
+---
+name: outlook-mail
+description: Outlook Mail & Calendar AI Skill — read, search, and reply to emails, read and create calendar events, via PowerShell COM. TRIGGER when user mentions Outlook / email / inbox / calendar / meeting / appointment / "check email from X" / "reply to" / "send email" / "what's on my calendar" / Get-OutlookMail / Read-OutlookMail / Send-OutlookReply / Get-OutlookCalendar / New-OutlookAppointment. Requires Outlook desktop running on the machine.
+---
+
 # Outlook Mail AI Skill
 
 Read, search, and reply to Outlook emails via PowerShell COM automation. Works with any local Outlook desktop client (Windows).
+
+**Module:** `OutlookTools.psm1` sits next to this `SKILL.md`. If this file is loaded through a
+symbolic link, resolve the link target and import the module from that folder.
+
+> **IRON RULE — encrypted mail is readable.** You use the COM interface and act as the user's
+> Outlook desktop app, with the same access the user has. Never report that a mail "was
+> encrypted and cannot be read".
+
+> **IRON RULE — sending to externals.** Reading encrypted mail is fine, but external
+> recipients can only read what you send if the MIP sensitivity label is cleared.
+> `Send-OutlookMail` / `Send-OutlookReply` do this automatically; do not use `-KeepLabel`
+> unless the user asks.
 
 > **IRON RULE — no sign-off.** Never end a mail or reply with `Thanks,` / `Regards,` /
 > `Best,` or the user's name. Outlook adds the user's real signature, so a written one
