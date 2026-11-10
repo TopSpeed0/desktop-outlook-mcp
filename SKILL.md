@@ -1,6 +1,7 @@
 ---
 name: outlook-mail
-description: Outlook Mail & Calendar AI Skill — read, search, and reply to emails, read and create calendar events, via PowerShell COM. TRIGGER when user mentions Outlook / email / inbox / calendar / meeting / appointment / "check email from X" / "reply to" / "send email" / "what's on my calendar" / Get-OutlookMail / Read-OutlookMail / Send-OutlookReply / Get-OutlookCalendar / New-OutlookAppointment. Requires Outlook desktop running on the machine.
+description: Outlook Mail & Calendar AI Skill — read, search, and reply to emails, read and create calendar events, triage unread mail into an Excel review workbook and turn its Reply column into reply drafts, via PowerShell COM. TRIGGER when user mentions Outlook / email / inbox / calendar / meeting / appointment / "check email from X" / "reply to" / "send email" / "what's on my calendar" / -reviewCSV / -SendCSV / -SendCSVRAW / mail review sheet / "what mail needs my action" / Get-OutlookMail / Read-OutlookMail / Send-OutlookReply / Get-OutlookCalendar / New-OutlookAppointment. Requires Outlook desktop running on the machine.
+argument-hint: "[-reviewCSV [-Days N] | -SendCSV [file.xlsx] | -SendCSVRAW [file.xlsx]]"
 ---
 
 # Outlook Mail AI Skill
@@ -62,6 +63,70 @@ Import-Module <path-to>\OutlookTools.psm1; Connect-Outlook
 | `Send-OutlookMail -To <addr> -Subject <text> -Body <text> [-CC] [-BCC] [-Attachments] [-HTML] [-Send] [-Unencrypted] [-KeepLabel] [-KeepSignOff] [-NoSignature]` | Compose new email. Opens draft by default; `-Send` sends immediately. Auto-clears the MIP label when a recipient is external. Adds the user's new-mail signature (the body goes inside `<body>`, above it); `-NoSignature` skips it. Resolves recipients against the address book like the GUI; an unresolved name gives a warning (draft) or blocks `-Send`. Result reports `SignatureAdded`, `SignOffRemoved` and `Unresolved`. |
 | `ConvertTo-EmailMarkdown -Html <string>` | Convert Outlook HTML to clean Markdown. Strips MSO/Word CSS bloat, converts tables/bold/italic/links/lists to Markdown syntax, decodes HTML entities. Pipeline: `Read-OutlookMail -EntryID $id -IncludeHTML \| ConvertTo-EmailMarkdown` |
 | `Save-OutlookMail -EntryID <id> -Format <MSG\|HTML\|TXT\|Markdown> [-DestinationPath]` | Save email to file. MSG = lossless, HTML = raw, TXT = plain text, Markdown = clean .md with metadata header. Default: `~/Downloads`. |
+| `Get-OutlookReviewCandidates [-Days] [-MaxItems] [-MaxBodyLength] [-IncludeHandled]` | Mail addressed to the user (To or CC) for triage. Default: unread Inbox; `-Days N` = read and unread from the last N days. Skips mail the user sent, and mail already closed (Ignore/Done/False Alarm) or drafted in an earlier workbook unless `-IncludeHandled`. Returns EntryID, Date, From, Subject, Role (To/CC), ToCount, CcCount, Importance, Body (newest message only, quoted thread cut). Does not mark mail read. |
+| `Export-OutlookReview [-Path] [-Show]` | Pipe triaged rows in (EntryID, Date, From, Subject, Role + Priority, Category, Summary, ActionNeeded). Writes a formatted `.xlsx` to `~/Downloads/OutlookReview/OutlookReview-<time>.xlsx`, sorted High→Low. |
+| `Import-OutlookReview [-Path] [-Pending]` | Read a review workbook (newest one when `-Path` is omitted). `-Pending` = rows with a Reply, no `Drafted` status, and Decision empty or `Reply`. |
+| `Send-OutlookReviewReplies [-Path] (-Raw \| -HtmlByEntryID <hashtable>)` | Open a reply **draft** per pending row (never sends), Reply-All when the row says `ReplyAll = Yes`, then writes `Drafted <time>` in Status. `-Raw` uses the Reply text exactly as typed. Refuses to run while the file is open in Excel. |
+| `ConvertTo-OutlookReplyHtml -Text <string>` | Plain text → HTML changing only line breaks (blank line = paragraph, newline = `<br>`, double spaces kept). |
+
+## Review Workbook — `-reviewCSV`, `-SendCSV`, `-SendCSVRAW`
+
+When the skill is invoked with one of these arguments (`/outlook-mail -reviewCSV`), run that
+workflow. The file is an Excel `.xlsx` despite the "CSV" names. **Replies are always drafts —
+never pass `-Send`, never send anything in these workflows.** Needs the `ImportExcel` module.
+
+### `-reviewCSV` — build the review workbook
+
+1. `Get-OutlookReviewCandidates` (add `-Days N` if the user gave a number of days). Save the
+   result to a JSON file in your scratchpad and read the bodies from there.
+2. Triage every mail yourself. **Keep** a mail when the user must do something (a question to
+   them, a request, an approval, an incident they were added to, a security finding in their
+   own repo) or it tells them something important (a decision, a plan affecting their systems,
+   a completed request they must verify). **Drop** marketing, newsletters, webinars,
+   auto-generated notices that need nothing, "thanks"/"works now" replies, and mail with only
+   a signature. In a thread with several unread replies, keep the one that carries the
+   request and mention the rest in its Summary.
+3. For each kept mail set:
+   - `Priority`: `High` (security, outage, a direct question blocking someone, a deadline),
+     `Medium` (needs action soon or affects the user's systems), `Low` (nice to know / small task).
+   - `Category`: `Action` or `Info`.
+   - `Summary`: 1–2 sentences — who wants what, with the ticket/host/repo names.
+   - `ActionNeeded`: what the user should do, imperative; empty for pure Info.
+4. Pipe the rows (with the candidate's EntryID, Date, From, Subject, Role) to
+   `Export-OutlookReview -Show`. Report the path, how many mails were scanned/kept, and the
+   High items in one short list.
+
+### `-SendCSV` — AI-written replies from the Reply column
+
+1. `Import-OutlookReview -Pending` (pass the path if the user gave one; default = newest file).
+2. For each row, read the mail (`Read-OutlookMail -EntryID ... -AsMarkdown -MaxBodyLength 4000`)
+   and turn the user's Reply notes into a proper reply: same meaning and decisions, nothing
+   invented, follow **Email Styling** and the no-sign-off rule. Keep it as short as the notes.
+3. Build `@{ <EntryID> = '<html>' }` for all rows and call
+   `Send-OutlookReviewReplies -HtmlByEntryID $html`. Report the drafts opened and any row skipped.
+
+### `-SendCSVRAW` — the user's words, unchanged
+
+`Send-OutlookReviewReplies -Raw`. Do not rewrite, translate, correct or style the text — the
+module only converts line breaks to HTML and keeps any sign-off the user wrote.
+
+### Workbook columns
+
+`No, Priority, Category, Date, From, Subject, Role, Summary, ActionNeeded, Decision, Reply,
+ReplyAll, Notes, Status, EntryID` (EntryID hidden). The user fills the highlighted columns:
+
+| Column | Values | Effect |
+|---|---|---|
+| **Decision** | `Reply` / `Ignore` / `Done` / `False Alarm` (drop-down) | `Ignore`, `Done`, `False Alarm` = never drafted (even with Reply text), row greyed out, and the mail is **not shown again** by the next `-reviewCSV`. Empty or `Reply` = drafted when Reply has text. |
+| **Reply** | free text | What to answer. Required for a draft. |
+| **ReplyAll** | `Yes` / `No` | `Yes` = Reply-All. |
+| **Notes** | free text | The user's own record ("false alarm – test secret"). Never sent. Read it when the user asks about a review. |
+| **Status** | written by the tool | `Drafted <time>` after the draft opens; that row is skipped next time and the mail is not shown again. Clear it to redo the row. |
+
+The next `-reviewCSV` reads all earlier workbooks in `~/Downloads/OutlookReview` and skips
+mail already closed or drafted there; say how many were skipped. `-IncludeHandled` shows them
+again. If a file is open in Excel the send step stops before creating anything — ask the user to
+close it.
 
 ## Performance
 

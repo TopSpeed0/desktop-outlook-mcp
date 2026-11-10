@@ -1180,8 +1180,340 @@ function Set-OutlookMeetingResponse {
 
 Set-Alias -Name Respond-OutlookMeeting -Value Set-OutlookMeetingResponse
 
+# ---------------------------------------------------------------------------
+# Review workbook: -reviewCSV / -SendCSV / -SendCSVRAW
+# ---------------------------------------------------------------------------
+
+$script:ReviewFolder = Join-Path $env:USERPROFILE 'Downloads\OutlookReview'
+$script:ReviewDecisions = 'Reply', 'Ignore', 'Done', 'False Alarm'
+# Rows with one of these decisions are never drafted and not shown again by the next review.
+$script:ReviewClosedDecision = '^(ignore|done|false alarm)$'
+
+# A row is pending when it has Reply text, is not closed by its Decision, and was not drafted.
+function Test-OutlookReviewPending {
+    param($Row)
+    "$($Row.Reply)".Trim() -and
+        "$($Row.Decision)".Trim() -notmatch $script:ReviewClosedDecision -and
+        "$($Row.Status)" -notmatch '^Drafted'
+}
+
+# EntryIDs the user already handled in earlier workbooks (closed decision or drafted reply).
+function Get-OutlookReviewHandledIds {
+    $ids = @{}
+    foreach ($f in Get-ChildItem $script:ReviewFolder -Filter 'OutlookReview-*.xlsx' -ErrorAction SilentlyContinue) {
+        try { $rows = Import-Excel -Path $f.FullName -WorksheetName 'Review' -ErrorAction Stop }
+        catch { Write-Warning "Could not read $($f.Name) (open in Excel?) - its decisions are not applied."; continue }
+        foreach ($r in $rows) {
+            if (-not $r.EntryID) { continue }
+            $why = if ("$($r.Decision)".Trim() -match $script:ReviewClosedDecision) { "$($r.Decision)".Trim() }
+                   elseif ("$($r.Status)" -match '^Drafted') { 'Drafted' }
+            if ($why) { $ids[$r.EntryID] = "$why ($($f.Name))" }
+        }
+    }
+    $ids
+}
+
+function Import-ImportExcelModule {
+    if (-not (Get-Module ImportExcel)) {
+        try { Import-Module ImportExcel -ErrorAction Stop }
+        catch { throw "The ImportExcel module is required: Install-Module ImportExcel -Scope CurrentUser" }
+    }
+}
+
+# Newest review workbook, used when -Path is not given.
+function Resolve-OutlookReviewPath {
+    param([string]$Path)
+    if ($Path) {
+        if (-not (Test-Path $Path)) { throw "Review file not found: $Path" }
+        return (Resolve-Path $Path).Path
+    }
+    $latest = Get-ChildItem $script:ReviewFolder -Filter 'OutlookReview-*.xlsx' -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if (-not $latest) { throw "No review file found in $script:ReviewFolder. Run the review first or pass -Path." }
+    $latest.FullName
+}
+
+function Assert-OutlookReviewWritable {
+    param([string]$Path)
+    try { $fs = [System.IO.File]::Open($Path, 'Open', 'ReadWrite', 'None'); $fs.Close() }
+    catch { throw "The review file is open or locked - close it in Excel and run again: $Path" }
+}
+
+# The newest message only: cut the quoted thread so the agent reads less.
+function Get-LatestMessageText {
+    param([string]$Text, [int]$MaxLength)
+    if (-not $Text) { return '' }
+    $m = [regex]::Match($Text, '(?im)^\s*(From:\s.+|-{3,}\s*Original Message\s*-{3,}|On .{5,120} wrote:)\s*$')
+    if ($m.Success -and $m.Index -gt 0) { $Text = $Text.Substring(0, $m.Index) }
+    $Text = ($Text -replace '(\r?\n\s*){3,}', "`n`n").Trim()
+    if ($MaxLength -gt 0 -and $Text.Length -gt $MaxLength) { $Text = $Text.Substring(0, $MaxLength) + ' [...]' }
+    $Text
+}
+
+function Get-OutlookReviewCandidates {
+    <#
+    .SYNOPSIS
+    Collect mail addressed to the user (To or CC) for the AI to triage into a review workbook.
+    .DESCRIPTION
+    Default: unread Inbox mail. -Days N scans read and unread mail from the last N days instead.
+    Mail sent by the user and mail where the user is only on a distribution list are skipped.
+    Mail already marked Ignore / Done / False Alarm, or already drafted, in an earlier review
+    workbook is skipped too (-IncludeHandled shows it again).
+    Reading items here does not mark them read.
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$Mailbox = $script:DefaultMailbox,
+        [string]$FolderPath = 'Inbox',
+        [int]$Days = 0,
+        [int]$MaxItems = 200,
+        [int]$MaxBodyLength = 1500,
+        [switch]$IncludeHandled
+    )
+    if (-not $Mailbox) { throw "No mailbox specified. Pass -Mailbox or set mailbox in outlook-config.json." }
+    if (-not $script:Namespace) { Connect-Outlook | Out-Null }
+    $handled = @{}
+    if (-not $IncludeHandled) { Import-ImportExcelModule; $handled = Get-OutlookReviewHandledIds }
+    $skipped = 0
+
+    $folder = $script:Namespace.Session.Folders.Item($Mailbox)
+    foreach ($part in ($FolderPath -split '\\' | Where-Object { $_ })) {
+        $found = $null
+        foreach ($f in $folder.Folders) { if ($f.Name -eq $part) { $found = $f; break } }
+        if (-not $found) { throw "Folder '$part' not found." }
+        $folder = $found
+    }
+
+    $filter = if ($Days -gt 0) {
+        "[ReceivedTime] >= '$(Format-OutlookDate -Date (Get-Date).AddDays(-$Days))'"
+    } else {
+        '@SQL=' + (New-DaslEqualsClause -Property $script:Dasl.Read -Value 0)
+    }
+    $items = $folder.Items.Restrict($filter)
+    try { $items.Sort('[ReceivedTime]', $true) } catch {}
+
+    $me = $Mailbox.ToLowerInvariant()
+    $n = 0
+    foreach ($item in $items) {
+        if ($n -ge $MaxItems) { Write-Warning "Stopped at -MaxItems $MaxItems."; break }
+        if ($item.Class -ne 43) { continue }
+        if ($handled.ContainsKey($item.EntryID)) {
+            Write-Verbose "Skipped, already handled: $($handled[$item.EntryID]) - $($item.Subject)"
+            $skipped++; continue
+        }
+        if (-not $item.Subject -and $item.EntryID) {
+            try { $item = $script:Namespace.GetItemFromID($item.EntryID) } catch {}
+        }
+
+        $sender = $null
+        try { $sender = $item.Sender.GetExchangeUser().PrimarySmtpAddress } catch {}
+        if (-not $sender) { $sender = $item.SenderEmailAddress }
+        if ($sender -and $sender.ToLowerInvariant() -eq $me) { continue }
+
+        $role = $null
+        foreach ($r in $item.Recipients) {
+            $smtp = Resolve-RecipientSmtp -Recipient $r
+            if ($smtp -and $smtp.ToLowerInvariant() -eq $me) {
+                $t = if ($r.Type -eq 1) { 'To' } elseif ($r.Type -eq 2) { 'CC' } else { $null }
+                if ($t -eq 'To') { $role = 'To'; break }
+                if ($t) { $role = $t }
+            }
+        }
+        if (-not $role) { continue }
+
+        $n++
+        [PSCustomObject]@{
+            EntryID        = $item.EntryID
+            Date           = $item.ReceivedTime
+            From           = $item.SenderName
+            FromEmail      = $sender
+            Subject        = $item.Subject
+            Role           = $role
+            ToCount        = ($item.To -split ';' | Where-Object { $_.Trim() }).Count
+            CcCount        = ($item.CC -split ';' | Where-Object { $_.Trim() }).Count
+            Importance     = @('Low', 'Normal', 'High')[$item.Importance]
+            HasAttachments = $item.Attachments.Count -gt 0
+            UnRead         = $item.UnRead
+            Body           = Get-LatestMessageText -Text $item.Body -MaxLength $MaxBodyLength
+        }
+    }
+    if ($skipped) { Write-Host "Skipped $skipped mail(s) already handled in earlier review workbooks (-IncludeHandled shows them)." -ForegroundColor Cyan }
+}
+
+function Export-OutlookReview {
+    <#
+    .SYNOPSIS
+    Write the triaged mail to a formatted review workbook (.xlsx).
+    .DESCRIPTION
+    Each input row needs EntryID, Date, From, Subject, Role, plus the AI's Priority
+    (High/Medium/Low), Category (Action/Info), Summary and ActionNeeded. Reply, ReplyAll
+    and Status start empty for the user to fill.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory, ValueFromPipeline)]
+        [object[]]$InputObject,
+        [string]$Path,
+        [switch]$Show
+    )
+    begin { $rows = [System.Collections.Generic.List[object]]::new() }
+    process { foreach ($o in $InputObject) { $rows.Add($o) } }
+    end {
+        Import-ImportExcelModule
+        if (-not $Path) {
+            New-Item -ItemType Directory -Path $script:ReviewFolder -Force | Out-Null
+            $Path = Join-Path $script:ReviewFolder ("OutlookReview-{0:yyyyMMdd-HHmm}.xlsx" -f (Get-Date))
+        }
+        if (Test-Path $Path) { Assert-OutlookReviewWritable -Path $Path; Remove-Item $Path -Force }
+
+        $rank = @{ High = 0; Medium = 1; Low = 2 }
+        $i = 0
+        $data = $rows | Sort-Object @{ e = { if ($rank.ContainsKey("$($_.Priority)")) { $rank["$($_.Priority)"] } else { 3 } } },
+                                    @{ e = { $_.Date }; Descending = $true } | ForEach-Object {
+            $i++
+            [PSCustomObject][ordered]@{
+                No = $i; Priority = $_.Priority; Category = $_.Category
+                Date = if ($_.Date -is [double]) { [datetime]::FromOADate($_.Date) } elseif ($_.Date) { [datetime]$_.Date } else { $null }
+                From = $_.From; Subject = $_.Subject; Role = $_.Role
+                Summary = $_.Summary; ActionNeeded = $_.ActionNeeded
+                Decision = "$($_.Decision)"; Reply = "$($_.Reply)"
+                ReplyAll = if ($_.ReplyAll) { "$($_.ReplyAll)" } else { 'No' }
+                Notes = "$($_.Notes)"; Status = "$($_.Status)"; EntryID = $_.EntryID
+            }
+        }
+        if (-not $data) { Write-Warning "Nothing to export."; return }
+
+        # A No, B Priority, C Category, D Date, E From, F Subject, G Role, H Summary, I ActionNeeded,
+        # J Decision, K Reply, L ReplyAll, M Notes, N Status, O EntryID (hidden)
+        $pkg = $data | Export-Excel -Path $Path -WorksheetName 'Review' -AutoFilter -FreezeTopRow -BoldTopRow -PassThru
+        $ws = $pkg.Workbook.Worksheets['Review']
+        $last = $data.Count + 1
+        $widths = @{ A = 5; B = 9; C = 9; D = 16; E = 22; F = 40; G = 6; H = 60; I = 40; J = 12; K = 60; L = 9; M = 35; N = 18; O = 12 }
+        foreach ($c in $widths.Keys) { $ws.Column([int][char]$c - 64).Width = $widths[$c] }
+        $ws.Cells["D2:D$last"].Style.Numberformat.Format = 'yyyy-mm-dd hh:mm'
+        $ws.Cells["A1:O$last"].Style.VerticalAlignment = 'Top'
+        foreach ($c in 'F', 'H', 'I', 'K', 'M') { $ws.Cells["${c}2:${c}$last"].Style.WrapText = $true }
+        $ws.Cells["A1:O1"].Style.Fill.PatternType = 'Solid'
+        $ws.Cells["A1:O1"].Style.Fill.BackgroundColor.SetColor([System.Drawing.Color]::FromArgb(0x1F, 0x4E, 0x79))
+        $ws.Cells["A1:O1"].Style.Font.Color.SetColor([System.Drawing.Color]::White)
+        foreach ($c in 'J', 'K', 'L', 'M') {
+            $ws.Cells["${c}2:${c}$last"].Style.Fill.PatternType = 'Solid'
+            $ws.Cells["${c}2:${c}$last"].Style.Fill.BackgroundColor.SetColor([System.Drawing.Color]::FromArgb(0xFF, 0xF8, 0xE1))
+        }
+        $ws.Column(15).Hidden = $true
+
+        $prio = @{ High = 'FFCDD2'; Medium = 'FFE0B2'; Low = 'E8F5E9' }
+        foreach ($p in $prio.Keys) {
+            Add-ConditionalFormatting -Worksheet $ws -Address "B2:B$last" -RuleType Equal -ConditionValue "`"$p`"" `
+                -BackgroundColor ([System.Drawing.ColorTranslator]::FromHtml("#$($prio[$p])"))
+        }
+        # A closed decision greys out the row.
+        Add-ConditionalFormatting -Worksheet $ws -Address "A2:O$last" -RuleType Expression `
+            -ConditionValue '=OR($J2="Ignore",$J2="Done",$J2="False Alarm")' -ForegroundColor Gray `
+            -BackgroundColor ([System.Drawing.ColorTranslator]::FromHtml('#EEEEEE'))
+        $d = $ws.DataValidations.AddListValidation("J2:J$last")
+        foreach ($x in $script:ReviewDecisions) { $d.Formula.Values.Add($x) }
+        $v = $ws.DataValidations.AddListValidation("L2:L$last")
+        $v.Formula.Values.Add('Yes'); $v.Formula.Values.Add('No')
+
+        Close-ExcelPackage $pkg -Show:$Show
+        Write-Host "Review workbook: $Path ($($data.Count) mails)" -ForegroundColor Green
+        [PSCustomObject]@{ Path = $Path; Count = $data.Count }
+    }
+}
+
+function Import-OutlookReview {
+    <#
+    .SYNOPSIS
+    Read a review workbook. -Pending returns only rows with a Reply, no Drafted status, and a
+    Decision that is empty or Reply (Ignore / Done / False Alarm rows are never pending).
+    #>
+    [CmdletBinding()]
+    param([string]$Path, [switch]$Pending)
+    Import-ImportExcelModule
+    $Path = Resolve-OutlookReviewPath -Path $Path
+    $rows = Import-Excel -Path $Path -WorksheetName 'Review'
+    if ($Pending) { $rows = $rows | Where-Object { Test-OutlookReviewPending -Row $_ } }
+    $rows | ForEach-Object { $_ | Add-Member -NotePropertyName ReviewPath -NotePropertyValue $Path -PassThru }
+}
+
+# Plain text to HTML with nothing changed but line breaks: blank line = new paragraph,
+# single newline = <br>, runs of spaces kept.
+function ConvertTo-OutlookReplyHtml {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Text)
+    $paras = ($Text.Trim() -replace '\r\n?', "`n") -split '\n\s*\n' | ForEach-Object {
+        $p = [System.Net.WebUtility]::HtmlEncode($_.Trim()) -replace '  ', '&nbsp; ' -replace '\n', '<br>'
+        "<p style=`"margin:0 0 10px 0`">$p</p>"
+    }
+    '<div style="font-family:Calibri,Arial,sans-serif;font-size:11pt;color:#333">' + ($paras -join '') + '</div>'
+}
+
+function Send-OutlookReviewReplies {
+    <#
+    .SYNOPSIS
+    Open a reply DRAFT for each review row that has a Reply and is not yet drafted. Never sends.
+    .DESCRIPTION
+    -Raw: the Reply text is used as written; only line breaks become HTML, and a written
+    sign-off is kept. Otherwise pass -HtmlByEntryID with the AI-written HTML for each row.
+    Each drafted row gets Status "Drafted <time>" so a second run skips it.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [string]$Path,
+        [switch]$Raw,
+        [hashtable]$HtmlByEntryID
+    )
+    if (-not $Raw -and -not $HtmlByEntryID) { throw "Pass -Raw, or -HtmlByEntryID with the AI-written reply HTML." }
+    Import-ImportExcelModule
+    $Path = Resolve-OutlookReviewPath -Path $Path
+    Assert-OutlookReviewWritable -Path $Path
+
+    $rows = @(Import-OutlookReview -Path $Path -Pending)
+    if (-not $rows) { Write-Host "No pending replies in $Path." -ForegroundColor Cyan; return }
+
+    $done = @{}
+    $results = foreach ($row in $rows) {
+        $html = if ($Raw) { ConvertTo-OutlookReplyHtml -Text "$($row.Reply)" } else { $HtmlByEntryID[$row.EntryID] }
+        if (-not $html) {
+            Write-Warning "No reply HTML for row $($row.No) '$($row.Subject)' - skipped."
+            [PSCustomObject]@{ No = $row.No; Subject = $row.Subject; Status = 'Skipped' }
+            continue
+        }
+        if (-not $PSCmdlet.ShouldProcess("Row $($row.No) '$($row.Subject)'", 'Open reply draft')) {
+            [PSCustomObject]@{ No = $row.No; Subject = $row.Subject; Status = 'NotDrafted' }
+            continue
+        }
+        try {
+            $r = Send-OutlookReply -EntryID $row.EntryID -Body $html -ReplyAll:("$($row.ReplyAll)" -match '^(y|yes|true)$') -KeepSignOff:$Raw
+            $done[$row.EntryID] = "Drafted {0:yyyy-MM-dd HH:mm}" -f (Get-Date)
+            [PSCustomObject]@{ No = $row.No; Subject = $row.Subject; Status = $r.Status; Recipients = ($r.Recipients -join '; ') }
+        }
+        catch {
+            Write-Warning "Row $($row.No) '$($row.Subject)': $($_.Exception.Message)"
+            [PSCustomObject]@{ No = $row.No; Subject = $row.Subject; Status = 'Failed' }
+        }
+    }
+
+    if ($done.Count) {
+        $pkg = Open-ExcelPackage -Path $Path
+        $ws = $pkg.Workbook.Worksheets['Review']
+        # Find columns by header so older workbooks (without Decision/Notes) still work.
+        $col = @{}
+        for ($c = 1; $c -le $ws.Dimension.End.Column; $c++) { $col["$($ws.Cells[1, $c].Value)"] = $c }
+        for ($r = 2; $r -le $ws.Dimension.End.Row; $r++) {
+            $id = $ws.Cells[$r, $col['EntryID']].Value
+            if ($id -and $done.ContainsKey($id)) { $ws.Cells[$r, $col['Status']].Value = $done[$id] }
+        }
+        Close-ExcelPackage $pkg
+    }
+    $results
+}
+
 Export-ModuleMember -Function Connect-Outlook, Disconnect-Outlook, Get-OutlookProfile,
     Get-OutlookFolder, Get-OutlookMail, Read-OutlookMail, Set-OutlookMailRead, Save-OutlookAttachment,
     Send-OutlookReply, Send-OutlookMail, ConvertTo-EmailMarkdown, Save-OutlookMail,
-    Get-OutlookCalendar, New-OutlookAppointment, Set-OutlookMeetingResponse `
+    Get-OutlookCalendar, New-OutlookAppointment, Set-OutlookMeetingResponse,
+    Get-OutlookReviewCandidates, Export-OutlookReview, Import-OutlookReview,
+    ConvertTo-OutlookReplyHtml, Send-OutlookReviewReplies `
     -Alias Respond-OutlookMeeting
