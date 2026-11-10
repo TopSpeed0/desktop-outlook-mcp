@@ -390,6 +390,7 @@ function Get-OutlookMail {
             From         = $item.SenderName
             FromEmail    = $item.SenderEmailAddress
             To           = $item.To
+            Date         = $item.ReceivedTime
             ReceivedTime = $item.ReceivedTime
             UnRead       = $item.UnRead
             BodyPreview  = if ($item.Body) { ($item.Body -replace '\r?\n', ' ').Substring(0, [Math]::Min(200, ($item.Body -replace '\r?\n', ' ').Length)) } else { '' }
@@ -432,6 +433,7 @@ function Read-OutlookMail {
         FromEmail    = $item.SenderEmailAddress
         To           = $item.To
         CC           = $item.CC
+        Date         = $item.ReceivedTime
         ReceivedTime = $item.ReceivedTime
         UnRead       = $item.UnRead
         Body         = $bodyText
