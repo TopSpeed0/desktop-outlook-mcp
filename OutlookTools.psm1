@@ -631,7 +631,11 @@ function Send-OutlookMail {
 
         [switch]$Unencrypted,
 
-        [switch]$KeepLabel
+        [switch]$KeepLabel,
+
+        [switch]$KeepSignOff,
+
+        [switch]$NoSignature
     )
     if (-not $script:Outlook) { Connect-Outlook | Out-Null }
 
@@ -640,7 +644,48 @@ function Send-OutlookMail {
     $mail.Subject = $Subject
     if ($CC) { $mail.CC = $CC }
     if ($BCC) { $mail.BCC = $BCC }
-    if ($HTML) { $mail.HTMLBody = $Body } else { $mail.Body = $Body }
+
+    # Match recipients to the address book now, as the Outlook GUI does while typing.
+    $unresolved = @()
+    try {
+        $null = $mail.Recipients.ResolveAll()
+        foreach ($r in $mail.Recipients) { if (-not $r.Resolved) { $unresolved += $r.Name } }
+    }
+    catch { Write-Verbose "Could not resolve recipients: $($_.Exception.Message)" }
+    if ($unresolved) {
+        Write-Warning "Outlook could not resolve: $($unresolved -join '; ')"
+        if ($Send -and -not $WhatIfPreference) {
+            Remove-UncommittedOutlookItem -MailItem $mail
+            throw "Not sent - unresolved recipient(s): $($unresolved -join '; ')"
+        }
+    }
+
+    # Outlook inserts the new-mail signature only when the inspector is created.
+    $signatureAdded = $false
+    if (-not $NoSignature) {
+        try { $null = $mail.GetInspector } catch { Write-Verbose "Could not create inspector: $($_.Exception.Message)" }
+        $signatureAdded = Test-OutlookSignature -Html $mail.HTMLBody
+    }
+
+    $htmlBody = if ($HTML) { $Body } else {
+        '<p style="font-family:Calibri,Arial,sans-serif;font-size:11pt">' +
+        ([System.Net.WebUtility]::HtmlEncode($Body) -replace "\r?\n", '<br>') + '</p>'
+    }
+
+    $signOffRemoved = $false
+    if ($signatureAdded) {
+        if (-not $KeepSignOff) {
+            $trimmed = Remove-TrailingSignOff -Html $htmlBody
+            if ($trimmed -ne $htmlBody) {
+                $htmlBody = $trimmed
+                $signOffRemoved = $true
+                Write-Host "Removed the sign-off from the body - Outlook adds the signature. Use -KeepSignOff to override." -ForegroundColor Yellow
+            }
+        }
+        $mail.HTMLBody = Join-ReplyHtml -Body $htmlBody -ReplyHtml $mail.HTMLBody
+    }
+    elseif ($HTML) { $mail.HTMLBody = $Body }
+    else { $mail.Body = $Body }
 
     foreach ($att in $Attachments) {
         if (Test-Path $att) { $mail.Attachments.Add($att) | Out-Null }
@@ -659,24 +704,24 @@ function Send-OutlookMail {
             Invoke-OutlookEncryptionDecision -MailItem $mail -Decision $decision
             $mail.Send()
             Write-Host "Mail sent: '$Subject' to $To" -ForegroundColor Green
-            return [PSCustomObject]@{ Status = 'Sent'; Subject = $Subject; To = $To; Encryption = $decision.Encryption; ExternalRecipients = $decision.ExternalRecipients }
+            return [PSCustomObject]@{ Status = 'Sent'; Subject = $Subject; To = $To; Encryption = $decision.Encryption; ExternalRecipients = $decision.ExternalRecipients; SignatureAdded = $signatureAdded; SignOffRemoved = $signOffRemoved; Unresolved = $unresolved }
         }
         # -WhatIf / declined at the -Confirm prompt: discard, change nothing.
         Remove-UncommittedOutlookItem -MailItem $mail
-        return [PSCustomObject]@{ Status = 'NotSent'; Subject = $Subject; To = $To; Encryption = "Would be: $($decision.Encryption)"; ExternalRecipients = $decision.ExternalRecipients }
+        return [PSCustomObject]@{ Status = 'NotSent'; Subject = $Subject; To = $To; Encryption = "Would be: $($decision.Encryption)"; ExternalRecipients = $decision.ExternalRecipients; SignatureAdded = $signatureAdded; SignOffRemoved = $signOffRemoved; Unresolved = $unresolved }
     }
 
     # -WhatIf without -Send: show what would happen, but open no draft.
     if ($WhatIfPreference) {
         Write-Host "What if: Opening draft '$Subject' to $To." -ForegroundColor Cyan
         Remove-UncommittedOutlookItem -MailItem $mail
-        return [PSCustomObject]@{ Status = 'NotSent'; Subject = $Subject; To = $To; Encryption = "Would be: $($decision.Encryption)"; ExternalRecipients = $decision.ExternalRecipients }
+        return [PSCustomObject]@{ Status = 'NotSent'; Subject = $Subject; To = $To; Encryption = "Would be: $($decision.Encryption)"; ExternalRecipients = $decision.ExternalRecipients; SignatureAdded = $signatureAdded; SignOffRemoved = $signOffRemoved; Unresolved = $unresolved }
     }
 
     Invoke-OutlookEncryptionDecision -MailItem $mail -Decision $decision
     $mail.Display()
     Write-Host "Draft opened: '$Subject' to $To" -ForegroundColor Cyan
-    [PSCustomObject]@{ Status = 'Draft'; Subject = $Subject; To = $To; Encryption = $decision.Encryption; ExternalRecipients = $decision.ExternalRecipients }
+    [PSCustomObject]@{ Status = 'Draft'; Subject = $Subject; To = $To; Encryption = $decision.Encryption; ExternalRecipients = $decision.ExternalRecipients; SignatureAdded = $signatureAdded; SignOffRemoved = $signOffRemoved; Unresolved = $unresolved }
 }
 
 function Get-OutlookCalendar {
