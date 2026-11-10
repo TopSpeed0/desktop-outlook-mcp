@@ -142,10 +142,51 @@ Save-OutlookMail -EntryID $mail.EntryID -Format Markdown                   # cle
 Save-OutlookMail -EntryID $mail.EntryID -Format MSG -DestinationPath C:\Temp
 ```
 
+## Mail Review Workbook
+
+Triage your mail in Excel, write short answers, and get reply drafts back. Nothing is ever sent.
+
+### 1. Build the review: `/outlook-mail -reviewCSV`
+
+- Scans **unread** Inbox mail where you are on **To or CC** (`-Days 3` = last 3 days, read or unread).
+- The AI keeps only mail that **needs action** or **matters**; marketing, auto-notices and
+  "thanks" replies are dropped.
+- Writes `~\Downloads\OutlookReview\OutlookReview-<date-time>.xlsx` and opens it, sorted
+  **High → Medium → Low**, with a Summary and the Action needed.
+- Mail you already handled in an earlier workbook is not shown again. No mail is marked read.
+
+### 2. Fill in the workbook (highlighted columns)
+
+| Column | What to put |
+|---|---|
+| **Decision** | `Reply` · `Ignore` · `Done` · `False Alarm`. The last three grey the row out; it is never answered and won't come back. |
+| **Reply** | What you want to answer: short notes or the full text. |
+| **ReplyAll** | `Yes` to answer everyone on the thread. |
+| **Notes** | Your own record, e.g. "false alarm – test secret". Never sent. |
+| **Status** | Leave empty; the tool fills it. |
+
+Save and **close Excel**.
+
+### 3. Create the reply drafts
+
+| Command | Result |
+|---|---|
+| `/outlook-mail -SendCSV` | The AI turns your notes into a styled reply, same meaning, nothing added. |
+| `/outlook-mail -SendCSVRAW` | Your Reply text exactly as typed; only line breaks are kept. |
+
+- Each reply opens as an **Outlook draft** with your reply signature. You review and press Send.
+- The row gets `Drafted <time>`, so a second run does not duplicate it. Clear Status to redo a row.
+- In Claude Code, type `/outl`, pick **outlook-mail**, then add the argument. Plain words work
+  too ("review my mail", "send the review replies raw").
+- If the send step says the file is locked, close it in Excel.
+
+Needs the `ImportExcel` PowerShell module (`Install-Module ImportExcel -Scope CurrentUser`).
+
 ## Requirements
 
 - Windows with Outlook desktop installed and running
 - PowerShell 5.1+ (or PowerShell 7+)
+- `ImportExcel` module for the mail review workbook
 
 ## Safety
 
